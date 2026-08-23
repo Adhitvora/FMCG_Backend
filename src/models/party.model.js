@@ -53,5 +53,8 @@ partySchema.index({ name: 1, town: 1, gst: 1 }, { unique: true });
 partySchema.index({ name: 1 });
 partySchema.index({ town: 1 });
 partySchema.index({ status: 1 });
+partySchema.index({ name: 1, status: 1 });
+partySchema.index({ company: 1, status: 1 });
+partySchema.index({ name: 'text', town: 'text' });
 
 module.exports = mongoose.model('Party', partySchema);

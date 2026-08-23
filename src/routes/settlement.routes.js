@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const {
   cancelSettlement,
+  calculateSettlementPreview,
   completeSettlement,
   createSettlement,
   getCompanySettlements,
@@ -27,6 +28,7 @@ router.get('/:id', getSettlement);
 router.get('/:id/pdf', getSettlementPDF);
 router.post('/', rbac('super_admin', 'admin', 'operator'), createSettlement);
 router.put('/:id', rbac('super_admin', 'admin', 'operator'), updateSettlement);
+router.post('/:id/calculate', rbac('super_admin', 'admin', 'operator'), calculateSettlementPreview);
 router.post('/:id/complete', rbac('super_admin', 'admin', 'operator'), completeSettlement);
 router.post('/:id/cancel', rbac('super_admin'), cancelSettlement);
 router.post('/:id/unlock', rbac('super_admin'), unlockSettlement);

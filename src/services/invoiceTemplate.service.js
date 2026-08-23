@@ -1,4 +1,15 @@
-const MAX_ROWS = 22;
+/**
+ * Invoice Template Service
+ * ───────────────────────
+ * Generates the HTML invoice matching the SEE(1).pdf master reference.
+ * One single template used for browser preview, print, and PDF generation.
+ *
+ * KEY DESIGN: The main data table, blank rows, and footer (GSTIN, Terms,
+ * Signature) are ALL rendered inside ONE <table> so there is zero gap
+ * between the last blank row and the footer rows. All borders align.
+ */
+
+const MAX_ROWS = 28; // data + blank rows to fit A4 with footer
 
 const escapeHtml = (value) => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -15,7 +26,7 @@ const formatDate = (value) => {
   }).format(date);
 };
 
-const getCompany = (invoice) => {
+const getCompanySnapshot = (invoice) => {
   const snapshot = invoice.companySnapshot || {};
   const company = invoice.company && typeof invoice.company === 'object' ? invoice.company : {};
   return {
@@ -23,6 +34,7 @@ const getCompany = (invoice) => {
     address: snapshot.address || company.address || '',
     contact: snapshot.contact || company.contact || '',
     gst: snapshot.gst || company.gst || '',
+    email: snapshot.email || company.email || '',
   };
 };
 
@@ -38,58 +50,44 @@ const getGrandTotal = (invoice) => {
   return (invoice.items || []).reduce((total, item) => total + getActualCases(item), 0);
 };
 
-const getCartonKey = (item, index) => {
-  const cartonId = item.cartonId || item.masterCartonId;
-  if (cartonId) return `carton:${cartonId}`;
-  const groupNumber = item.cartonGroupNumber || item.cartonDisplayValue;
-  if (groupNumber) return `group:${groupNumber}`;
-  return `single:${item.replacement || item.replacementId || index}`;
-};
-
+// ─── CASE 2 / Merge Logic ───
 const buildDisplayRows = (items) => {
-  const seen = new Set();
   const groupSizes = new Map();
 
-  items.forEach((item, index) => {
-    let isMerged = item.isMergedGroup;
-    if (isMerged === undefined) {
-      const cId = item.cartonId ? String(item.cartonId) : null;
-      isMerged = cId ? true : false;
-    }
-
-    if (isMerged && item.cartonId) {
-      const key = String(item.cartonId);
-      groupSizes.set(key, (groupSizes.get(key) || 0) + 1);
+  items.forEach((item) => {
+    const cId = item.cartonId ? String(item.cartonId) : null;
+    const isMerged = item.isMergedGroup !== undefined ? item.isMergedGroup : (cId ? true : false);
+    if (isMerged && cId) {
+      groupSizes.set(cId, (groupSizes.get(cId) || 0) + 1);
     }
   });
 
+  const seen = new Set();
+
   return items.map((item, index) => {
+    const cId = item.cartonId ? String(item.cartonId) : null;
     let isMerged = item.isMergedGroup;
     if (isMerged === undefined) {
-      const cId = item.cartonId ? String(item.cartonId) : null;
       const count = cId ? items.filter(i => String(i.cartonId) === cId).length : 0;
       isMerged = cId && count > 1;
     }
 
-    const key = isMerged ? String(item.cartonId) : `single:${index}`;
+    const key = isMerged ? cId : `single:${index}`;
     const isFirstInGroup = !seen.has(key);
     seen.add(key);
 
-    const groupSize = isMerged ? (groupSizes.get(key) || 1) : 1;
+    const groupSize = isMerged ? (groupSizes.get(cId) || 1) : 1;
 
-    let case2Value = item.case2Value;
-    if (case2Value === undefined || case2Value === null) {
-      case2Value = isMerged ? 1 : getActualCases(item);
+    let case2Value;
+    if (item.case2Value !== undefined && item.case2Value !== null) {
+      case2Value = item.case2Value;
+    } else if (!isMerged) {
+      case2Value = getActualCases(item);
+    } else {
+      case2Value = 1;
     }
 
-    return {
-      item,
-      index,
-      groupKey: key,
-      isFirstInGroup,
-      groupSize,
-      case2Value,
-    };
+    return { item, index, groupKey: key, isFirstInGroup, groupSize, case2Value, isMerged };
   });
 };
 
@@ -109,168 +107,286 @@ const chunkDisplayRows = (rows) => {
   return pages;
 };
 
+// ─── CSS matching SEE(1).pdf exactly ───
 const PRINT_CSS = `
-:root { --invoice-border: 0.25mm solid #000; }
 @page { size: A4 portrait; margin: 0; }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
 html, body {
-  width: 210mm; min-height: 297mm; margin: 0; padding: 0; background: #fff; color: #000;
-  font-family: "Times New Roman", Times, serif; -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  width: 210mm; margin: 0; padding: 0; background: #fff; color: #000;
+  font-family: "Times New Roman", Times, serif;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
 }
-.invoice-page { width: 210mm; min-height: 297mm; padding: 6mm 7mm 5mm; page-break-after: always; break-after: page; }
+
+.invoice-page {
+  width: 210mm; height: 297mm; padding: 5mm 6mm 4mm;
+  page-break-after: always; break-after: page;
+}
 .invoice-page:last-child { page-break-after: auto; break-after: auto; }
-.invoice-frame { border: var(--invoice-border); min-height: 286mm; display: flex; flex-direction: column; overflow: hidden; box-sizing: border-box; }
-.business-header { text-align: center; padding: 2mm 3mm 1.5mm; border-bottom: var(--invoice-border); box-sizing: border-box; }
-.business-name { font-size: 15pt; font-weight: 700; line-height: 1.15; }
-.business-address, .business-contact { font-size: 7.5pt; line-height: 1.35; }
-.title-row { display: flex; height: 7mm; border-bottom: var(--invoice-border); box-sizing: border-box; }
-.title-left { flex: 1; display: flex; align-items: center; justify-content: center; font-size: 11pt; font-weight: 700; border-right: var(--invoice-border); box-sizing: border-box; }
-.title-right { width: 30mm; display: flex; align-items: center; justify-content: center; font-size: 8.5pt; font-weight: 700; }
-.party-section { display: flex; min-height: 42mm; border-bottom: var(--invoice-border); box-sizing: border-box; }
-.party-panel { flex: 1; padding: 2mm 3mm; border-right: var(--invoice-border); display: flex; flex-direction: column; box-sizing: border-box; }
-.party-name-container { font-size: 11pt; font-weight: 700; margin-bottom: 2mm; display: flex; gap: 1mm; }
-.party-address-line, .party-contact, .city-line { font-size: 9pt; line-height: 1.45; }
-.city-line { font-weight: 700; margin-top: 2mm; }
-.party-gst { margin-top: auto; font-size: 9pt; font-weight: 700; }
-.meta-panel { width: 72mm; display: flex; flex-direction: column; }
-.meta-row { display: flex; align-items: center; border-bottom: var(--invoice-border); padding: 0 3mm; min-height: 7mm; font-size: 9pt; font-weight: 700; box-sizing: border-box; }
-.meta-empty { flex: 1; }
-.meta-label { width: 31mm; }
-.table-wrap { flex: 1; }
-.invoice-table { width: 100%; border-collapse: collapse; table-layout: fixed; border-spacing: 0; border-style: hidden; }
-.invoice-table th, .invoice-table td {
-  border: var(--invoice-border); padding: 0.6mm 1.2mm; height: 6.7mm; min-height: 6.7mm;
-  font-size: 9.5pt; line-height: 1.12; vertical-align: middle; overflow-wrap: break-word; word-break: normal; box-sizing: border-box;
+
+/* Single outer border frame */
+.invoice-frame {
+  border: 0.4mm solid #000;
+  height: 100%;
+  overflow: hidden;
 }
-.invoice-table th { text-align: center; font-weight: 700; }
-.invoice-table .center, .invoice-table .merged-carton-cell { text-align: center; }
-.invoice-table .merged-carton-cell { font-weight: 700; vertical-align: middle; }
-.invoice-table .blank td { color: transparent; }
-.invoice-table col:nth-child(1) { width: 10mm; }
-.invoice-table col:nth-child(2) { width: 76.5mm; }
-.invoice-table col:nth-child(3) { width: 35mm; }
-.invoice-table col:nth-child(4) { width: 30mm; }
-.invoice-table col:nth-child(5) { width: 22mm; }
-.invoice-table col:nth-child(6) { width: 22mm; }
 
-.invoice-footer { width: 100%; border-collapse: collapse; table-layout: fixed; border-spacing: 0; border-style: hidden; }
-.invoice-footer td { border: var(--invoice-border); box-sizing: border-box; }
-.invoice-footer col:nth-child(1) { width: 10mm; }
-.invoice-footer col:nth-child(2) { width: 76.5mm; }
-.invoice-footer col:nth-child(3) { width: 35mm; }
-.invoice-footer col:nth-child(4) { width: 30mm; }
-.invoice-footer col:nth-child(5) { width: 22mm; }
-.invoice-footer col:nth-child(6) { width: 22mm; }
+/* ── HEADER ── */
+.header {
+  text-align: center;
+  padding: 3mm 3mm 1.5mm;
+  border-bottom: 0.4mm solid #000;
+}
+.header-name {
+  font-size: 16pt; font-weight: 700; letter-spacing: 0.5px;
+  line-height: 1.15;
+}
+.header-addr { font-size: 7pt; line-height: 1.35; margin-top: 0.5mm; }
+.header-contact { font-size: 7pt; line-height: 1.35; }
 
-.footer-total-row td { height: 7mm; font-size: 9pt; padding: 0 1.2mm; }
-.gstin-cell { padding-left: 2mm !important; }
-.footer-main-row td { height: 26mm; vertical-align: top; padding: 1.5mm 2mm; font-size: 8pt; line-height: 1.55; }
-.terms-title { font-weight: 700; }
-.company-sign-cell { position: relative; }
-.for-company { position: absolute; bottom: 2mm; right: 3mm; font-size: 9pt; font-weight: 700; text-align: right; }
-.signature-row td { height: 10mm; vertical-align: middle; font-size: 8.5pt; font-weight: 700; text-align: center; }
+/* ── TITLE ROW ── */
+.title-row {
+  display: flex; border-bottom: 0.4mm solid #000;
+  height: 7mm;
+}
+.title-left {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 11pt; font-weight: 700;
+  border-right: 0.4mm solid #000;
+}
+.title-right {
+  width: 28mm; display: flex; align-items: center; justify-content: center;
+  font-size: 8.5pt; font-weight: 700;
+}
 
-.continued { text-align: center; padding: 5mm 0; font-size: 9pt; font-weight: 700; border-top: var(--invoice-border); box-sizing: border-box; }
+/* ── PARTY + META SECTION ── */
+.party-meta {
+  display: flex; border-bottom: 0.4mm solid #000;
+  min-height: 36mm;
+}
+.party-left {
+  flex: 1; padding: 1.5mm 3mm;
+  border-right: 0.4mm solid #000;
+  display: flex; flex-direction: column;
+}
+.party-ms { font-size: 10pt; font-weight: 700; margin-bottom: 1mm; }
+.party-line { font-size: 8.5pt; line-height: 1.4; }
+.party-line-bold { font-size: 8.5pt; line-height: 1.4; font-weight: 700; margin-top: 1.5mm; }
+.party-gst { font-size: 8.5pt; font-weight: 700; margin-top: auto; padding-top: 1mm; }
+.meta-right { width: 62mm; display: flex; flex-direction: column; }
+.meta-row {
+  display: flex; align-items: center;
+  border-bottom: 0.4mm solid #000;
+  padding: 0 2mm; height: 7mm;
+  font-size: 8.5pt; font-weight: 700;
+}
+.meta-row:last-child { border-bottom: none; }
+.meta-label { width: 26mm; }
+.meta-value { flex: 1; }
+.meta-empty { flex: 1; }
+
+/* ── SINGLE TABLE for data + blanks + footer ── */
+table.inv {
+  width: 100%; border-collapse: collapse; table-layout: fixed; border-spacing: 0;
+}
+table.inv th, table.inv td {
+  border: 0.4mm solid #000;
+  padding: 0.4mm 1.2mm;
+  font-size: 9pt; line-height: 1.15;
+  vertical-align: middle;
+  overflow-wrap: break-word; word-break: normal;
+}
+/* Remove outer borders that duplicate the frame border */
+table.inv th:first-child, table.inv td:first-child { border-left: none; }
+table.inv th:last-child, table.inv td:last-child { border-right: none; }
+table.inv thead tr:first-child th { border-top: none; }
+table.inv tbody tr:last-child td { border-bottom: none; }
+
+table.inv th { text-align: center; font-weight: 700; font-size: 9.5pt; }
+table.inv .c { text-align: center; }
+table.inv .merged-cell { text-align: center; font-weight: 700; vertical-align: middle; }
+
+/* Fixed row heights */
+table.inv .data-row td,
+table.inv .blank-row td { height: 6.4mm; }
+table.inv .blank-row td { color: transparent; }
+
+/* Column widths: SR | PARTY NAME | TOWN | RL NO | CASE1 | CASE2 */
+table.inv col:nth-child(1) { width: 8%; }
+table.inv col:nth-child(2) { width: 35%; }
+table.inv col:nth-child(3) { width: 17%; }
+table.inv col:nth-child(4) { width: 16%; }
+table.inv col:nth-child(5) { width: 12%; }
+table.inv col:nth-child(6) { width: 12%; }
+
+/* ── FOOTER ROWS (inside same table) ── */
+table.inv .gstin-row td {
+  height: 7mm; vertical-align: middle; font-weight: 700; font-size: 9pt;
+  padding: 0 1.5mm;
+}
+table.inv .terms-row td {
+  height: 24mm; vertical-align: top; padding: 1.5mm 2mm;
+  font-size: 8pt; line-height: 1.55;
+}
+.terms-title { font-weight: 700; font-size: 8.5pt; margin-bottom: 0.5mm; }
+.terms-text { font-size: 7.5pt; line-height: 1.5; }
+.company-sig {
+  text-align: right; font-weight: 700; font-size: 8.5pt;
+  display: flex; flex-direction: column;
+  align-items: flex-end; justify-content: flex-end;
+  height: 100%; padding-bottom: 1mm;
+}
+table.inv {
+  width: 100%;
+  table-layout: fixed;
+}
+
+table.inv .sig-row td {
+  width: 33.333%;
+  height: 14mm;
+  text-align: center;
+  vertical-align: middle;
+  font-size: 8pt;
+  font-weight: 700;
+}
+
+.continued {
+  text-align: center; padding: 4mm 0;
+  font-size: 9pt; font-weight: 700;
+  border-top: 0.4mm solid #000;
+}
 `;
 
+// ─── Render Functions ───
+
 const renderHeader = () => {
-  const businessName = process.env.INVOICE_BUSINESS_NAME || 'SHRI HET - ARYA ENTERPRISE';
-  const businessAddress = process.env.INVOICE_BUSINESS_ADDRESS || 'A-4 Urja Commercial Park, B/h. Audi Showroom, Navsarjan Main Road, Rajkot, Gujarat 360005';
-  const businessContact = process.env.INVOICE_BUSINESS_CONTACT || 'Mo.: 9737351254, 9998757976 - Email: hetarya@gmail.com - www.hetarya.com';
-  return `<div class="business-header"><div class="business-name">${escapeHtml(businessName)}</div><div class="business-address">${escapeHtml(businessAddress)}</div><div class="business-contact">${escapeHtml(businessContact)}</div></div>`;
+  const name = process.env.INVOICE_BUSINESS_NAME || 'SHRI HET - ARYA ENTERPRISE';
+  const addr = process.env.INVOICE_BUSINESS_ADDRESS || 'A-4,Urja Commercial Park B/h. Audi Showroom Navsarjan Main Road. Rajkot,Gujarat,360003';
+  const contact = process.env.INVOICE_BUSINESS_CONTACT || 'Mo.: 95737251254 / 9898731732 ~ Email : hetarya@gmail.com - www.hetarya.com';
+  return `<div class="header"><div class="header-name">${escapeHtml(name)}</div><div class="header-addr">${escapeHtml(addr)}</div><div class="header-contact">${escapeHtml(contact)}</div></div>`;
 };
 
-const renderTitleRow = () => '<div class="title-row"><div class="title-left">REPLACEMENT PARTY LIST</div><div class="title-right">ORIGINAL</div></div>';
+const renderTitleRow = () =>
+  '<div class="title-row"><div class="title-left">REPLACEMENT PARTY LIST</div><div class="title-right">ORIGINAL</div></div>';
 
-const renderPartyInfo = (invoice, company) => {
-  const lines = getAddressLines(company.address);
-  const addressLines = lines.length > 1 ? lines.slice(0, -1) : lines;
-  const cityLine = lines.length > 1 ? lines[lines.length - 1] : '';
+const renderPartyMeta = (invoice, companySnap) => {
+  const addrLines = getAddressLines(companySnap.address);
+  const allAddrLines = addrLines.length > 1 ? addrLines.slice(0, -1) : addrLines;
+  const cityLine = addrLines.length > 1 ? addrLines[addrLines.length - 1] : '';
+
   return [
-    '<div class="party-section"><div class="party-panel">',
-    `<div class="party-name-container"><span>M/S.</span><span>${escapeHtml(company.name)}</span></div>`,
-    addressLines.map((line) => `<div class="party-address-line">${escapeHtml(line)}</div>`).join(''),
-    company.contact ? `<div class="party-contact">Mobile No.:+91 ${escapeHtml(company.contact.replace('+91', '').trim())}</div>` : '',
-    cityLine ? `<div class="city-line">${escapeHtml(cityLine)}</div>` : '',
-    `<div class="party-gst">GSTIN No. ${escapeHtml(company.gst || 'COMPNYGSTNUMBER')}</div>`,
-    '</div><div class="meta-panel">',
-    `<div class="meta-row"><span class="meta-label">DATE :</span><span>${escapeHtml(formatDate(invoice.invoiceDate))}</span></div>`,
-    `<div class="meta-row"><span class="meta-label">INVOICE NO :</span><span>${escapeHtml(invoice.invoiceNumber)}</span></div>`,
-    `<div class="meta-row"><span class="meta-label">TRANSPORT :</span><span>${escapeHtml(invoice.transportName || '')}</span></div>`,
-    '<div class="meta-empty"></div>',
-    '</div></div>',
-  ].join('');
+    '<div class="party-meta">',
+    '  <div class="party-left">',
+    `    <div class="party-ms">M/S. ${escapeHtml(companySnap.name)}</div>`,
+    allAddrLines.map(line => `    <div class="party-line">${escapeHtml(line)}</div>`).join(''),
+    companySnap.contact ? `    <div class="party-line">Mobile No.:+91 ${escapeHtml(companySnap.contact.replace(/^\+91\s*/, '').trim())}</div>` : '',
+    cityLine ? `    <div class="party-line-bold">${escapeHtml(cityLine)}</div>` : '',
+    `    <div class="party-gst">GSTIN No.  ${escapeHtml(companySnap.gst || 'COMPNYGSTNUMBER')}</div>`,
+    '  </div>',
+    '  <div class="meta-right">',
+    `    <div class="meta-row"><span class="meta-label">DATE :</span><span class="meta-value">${escapeHtml(formatDate(invoice.invoiceDate))}</span></div>`,
+    `    <div class="meta-row"><span class="meta-label">INVOICE NO :</span><span class="meta-value">${escapeHtml(invoice.invoiceNumber || '')}</span></div>`,
+    `    <div class="meta-row"><span class="meta-label">TRANSPORT :</span><span class="meta-value">${escapeHtml(invoice.transportName || '')}</span></div>`,
+    '    <div class="meta-empty"></div>',
+    '  </div>',
+    '</div>',
+  ].join('\n');
 };
 
 const renderDataRow = (row, sr) => {
   const item = row.item;
-
-  let cartonCell = '';
+  let case2Cell = '';
   if (row.isFirstInGroup) {
     const rowspanAttr = row.groupSize > 1 ? ` rowspan="${row.groupSize}"` : '';
-    cartonCell = `<td${rowspanAttr} class="merged-carton-cell">${escapeHtml(row.case2Value)}</td>`;
+    case2Cell = `<td${rowspanAttr} class="merged-cell">${escapeHtml(row.case2Value)}</td>`;
   }
-
-  return `<tr><td class="center">${sr}</td><td>${escapeHtml(item.partyName || '')}</td><td>${escapeHtml(item.town || '')}</td><td class="center">${escapeHtml(item.lrNo || '')}</td><td class="center">${getActualCases(item)}</td>${cartonCell}</tr>`;
+  return `<tr class="data-row"><td class="c">${sr}</td><td>${escapeHtml(item.partyName || '')}</td><td>${escapeHtml(item.town || '')}</td><td class="c">${escapeHtml(item.lrNo || '')}</td><td class="c">${getActualCases(item)}</td>${case2Cell}</tr>`;
 };
 
-const renderTable = (rows, startIndex, blankRows) => {
-  const body = rows.map((row, index) => renderDataRow(row, startIndex + index + 1)).join('');
-  const blanks = Array.from({ length: Math.max(0, blankRows) }, () => '<tr class="blank"><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td></tr>').join('');
-  
-  return `<div class="table-wrap"><table class="invoice-table"><colgroup><col><col><col><col><col><col></colgroup><thead><tr><th>SR.</th><th>PARTY NAME</th><th>TOWN</th><th>RL NO</th><th>CASE</th><th>CASE</th></tr></thead><tbody>${body}${blanks}</tbody></table></div>`;
-};
+const renderBlankRow = () =>
+  '<tr class="blank-row"><td>&nbsp;</td><td></td><td></td><td></td><td></td><td></td></tr>';
 
-const renderFooter = (invoice, company, allRows) => {
+const renderFooterRows = (invoice, companySnap, allRows) => {
   const businessName = process.env.INVOICE_BUSINESS_NAME || 'SHRI HET - ARYA ENTERPRISE';
-  const totalCases = getGrandTotal(invoice);
-  let totalCartons = invoice.totalCase2;
+  const businessGst = companySnap.gst || process.env.INVOICE_BUSINESS_GST || '24ABPFS1872C1Z5';
+  const totalCase1 = getGrandTotal(invoice);
 
-  if (totalCartons === undefined || totalCartons === null) {
-    totalCartons = allRows.filter(r => r.isFirstInGroup).reduce((sum, r) => sum + r.case2Value, 0);
+  let totalCase2 = invoice.totalCase2;
+  if (totalCase2 === undefined || totalCase2 === null) {
+    totalCase2 = allRows.filter(r => r.isFirstInGroup).reduce((sum, r) => sum + Number(r.case2Value || 0), 0);
   }
 
-  return `<table class="invoice-footer">
-    <colgroup><col><col><col><col><col><col></colgroup>
-    <tbody>
-        <tr class="footer-total-row">
-            <td colspan="3" class="gstin-cell">
-                <strong>GSTIN No.: ${escapeHtml(company.gst || process.env.INVOICE_BUSINESS_GST || '24ABPFS1872C1Z5')}</strong>
-            </td>
-            <td class="center">
-                <strong>Grand Total Case</strong>
-            </td>
-            <td class="center">
-                <strong>${escapeHtml(totalCases)}</strong>
-            </td>
-            <td class="center">
-                <strong>${escapeHtml(totalCartons)}</strong>
-            </td>
-        </tr>
-        <tr class="footer-main-row">
-            <td colspan="4">
-                <div class="terms-title">Terms &amp; Condition :</div>
-                <div>1. The company is responsible for matching this list with the replacement shipment.</div>
-                <div>2. Please inform the company after receiving the replacement shipment.</div>
-                <div>3. Please report any missing cases to the company.</div>
-            </td>
-            <td colspan="2" class="company-sign-cell">
-                <div class="for-company">For, ${escapeHtml(businessName)}</div>
-            </td>
-        </tr>
-        <tr class="signature-row">
-            <td colspan="2">Prepared By :</td>
-            <td colspan="2">Approved By :</td>
-            <td colspan="2">Authorized Sign</td>
-        </tr>
-    </tbody>
-  </table>`;
+  return [
+    // GSTIN + Grand Total row
+    '<tr class="gstin-row">',
+    `  <td colspan="3" style="padding-left:2mm;"><strong>GSTIN No.: ${escapeHtml(businessGst)}</strong></td>`,
+    '  <td class="c"><strong>Grand Total Case</strong></td>',
+    `  <td class="c"><strong>${escapeHtml(totalCase1)}</strong></td>`,
+    `  <td class="c"><strong>${escapeHtml(totalCase2)}</strong></td>`,
+    '</tr>',
+    // Terms + Company Signature row
+    '<tr class="terms-row">',
+    '  <td colspan="3">',
+    '    <div class="terms-title">Terms &amp; Condition :</div>',
+    '    <div class="terms-text">1.The company is responsible for matching this list with the replacement shipment.</div>',
+    '    <div class="terms-text">2.Please inform the company after receiving the replacement shipment.</div>',
+    '    <div class="terms-text">3.Please report any missing cases to the company.</div>',
+    '  </td>',
+    '  <td colspan="2">',
+    `    <div class="company-sig">For, ${escapeHtml(businessName)}</div>`,
+    '  </td>',
+    '</tr>',
+    // Signature row
+    '<tr class="sig-row">',
+    '  <td colspan="2">Prepared By :</td>',
+    '  <td colspan="2">Approved By :</td>',
+    '  <td colspan="2">Authorized Sign</td>',
+    '</tr>',
+  ].join('\n');
+};
+
+/**
+ * Renders ONE complete table: thead + data rows + blank rows + footer rows.
+ * This ensures there is ZERO gap between blank rows and the footer.
+ * All borders are continuous and column widths are shared.
+ */
+const renderFullTable = (rows, startIndex, blankRowCount, invoice, companySnap, allRows, isLastPage) => {
+  const dataHtml = rows.map((row, i) => renderDataRow(row, startIndex + i + 1)).join('');
+  const blanksHtml = Array.from({ length: Math.max(0, blankRowCount) }, () => renderBlankRow()).join('');
+
+  const footerHtml = isLastPage
+    ? renderFooterRows(invoice, companySnap, allRows)
+    : '';
+
+  return [
+    '<table class="inv">',
+    '<colgroup><col><col><col><col><col><col></colgroup>',
+    '<thead><tr><th>SR.</th><th>PARTY NAME</th><th>TOWN</th><th>RL NO</th><th>CASE</th><th>CASE</th></tr></thead>',
+    '<tbody>',
+    dataHtml,
+    blanksHtml,
+    footerHtml,
+    '</tbody>',
+    '</table>',
+  ].join('');
 };
 
 const renderPage = (invoice, rows, startIndex, pageIndex, isLastPage, allRows) => {
-  const company = getCompany(invoice);
-  const blankRows = MAX_ROWS - rows.length;
-  return `<section class="invoice-page"><div class="invoice-frame">${renderHeader()}${renderTitleRow()}${renderPartyInfo(invoice, company)}${renderTable(rows, startIndex, blankRows)}${isLastPage ? renderFooter(invoice, company, allRows) : '<div class="continued">Continued on next page...</div>'}</div></section>`;
+  const companySnap = getCompanySnapshot(invoice);
+  const blankRowCount = Math.max(0, MAX_ROWS - rows.length);
+
+  const parts = [
+    '<section class="invoice-page">',
+    '<div class="invoice-frame">',
+    renderHeader(),
+    renderTitleRow(),
+    renderPartyMeta(invoice, companySnap),
+    renderFullTable(rows, startIndex, blankRowCount, invoice, companySnap, allRows, isLastPage),
+    isLastPage ? '' : '<div class="continued">Continued on next page...</div>',
+    '</div>',
+    '</section>',
+  ];
+
+  return parts.filter(Boolean).join('');
 };
 
 const buildInvoiceHtml = (invoice) => {

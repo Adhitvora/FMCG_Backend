@@ -13,6 +13,7 @@ const auditLogRoutes = require('./auditLog.routes');
 const partyListRoutes = require('./partyList.routes');
 const settlementRoutes = require('./settlement.routes');
 const searchRoutes = require('./search.routes');
+const productRoutes = require('./product.routes');
 
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);
@@ -27,6 +28,7 @@ router.use('/audit-logs', auditLogRoutes);
 router.use('/party-list', partyListRoutes);
 router.use('/settlements', settlementRoutes);
 router.use('/search', searchRoutes);
+router.use('/products', productRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

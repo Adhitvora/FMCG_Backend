@@ -122,7 +122,7 @@ const getParties = async (req, res, next) => {
     }
 
     const [parties, total] = await Promise.all([
-      Party.find(filter).populate('transport', 'name').sort({ name: 1 }).skip(skip).limit(limit),
+      Party.find(filter).select('name town gst mobile address status transport createdAt').populate('transport', 'name').sort({ name: 1 }).skip(skip).limit(limit).lean(),
       Party.countDocuments(filter),
     ]);
 
@@ -137,9 +137,13 @@ const getAllParties = async (req, res, next) => {
   try {
     const filter = { status: 'active' };
     if (req.query.search) {
-      filter.name = { $regex: req.query.search, $options: 'i' };
+      filter.$or = [
+        { name: { $regex: req.query.search, $options: 'i' } },
+        { town: { $regex: req.query.search, $options: 'i' } },
+        { gst: { $regex: req.query.search, $options: 'i' } },
+      ];
     }
-    const parties = await Party.find(filter).sort({ name: 1 }).select('name town gst').limit(50);
+    const parties = await Party.find(filter).sort({ name: 1, town: 1 }).select('name town gst');
     ApiResponse.success(res, parties);
   } catch (error) {
     next(error);

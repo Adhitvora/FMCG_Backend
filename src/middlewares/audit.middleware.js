@@ -15,9 +15,10 @@ const createAuditLog = async ({
   newValue = null,
   ip = '',
   browser = '',
+  session = null,
 }) => {
   try {
-    await AuditLog.create({
+    const auditLog = {
       userId,
       username,
       action,
@@ -28,7 +29,13 @@ const createAuditLog = async ({
       newValue,
       ip,
       browser,
-    });
+    };
+
+    if (session) {
+      await AuditLog.create([auditLog], { session });
+    } else {
+      await AuditLog.create(auditLog);
+    }
   } catch (error) {
     // Audit logging should never break the main flow
     console.error('Audit log error:', error.message);

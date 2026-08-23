@@ -291,5 +291,15 @@ replacementSchema.pre('validate', function (next) {
   next();
 });
 
-module.exports = mongoose.model('Replacement', replacementSchema);
+// ─── Additional Performance Indexes ───
+replacementSchema.index({ company: 1, status: 1 });
+replacementSchema.index({ party: 1, status: 1 });
+replacementSchema.index({ company: 1, approvalStatus: 1 });
+replacementSchema.index({ status: 1, approvalStatus: 1 });
+replacementSchema.index({ status: 1, sentDate: 1 });
+replacementSchema.index({ status: 1, invoiceId: 1 });
+replacementSchema.index({ status: 1, receivingDate: -1 });
+replacementSchema.index({ cartonStatus: 1 });
+replacementSchema.index({ company: 1, party: 1, receivingDate: -1 });
 
+module.exports = mongoose.model('Replacement', replacementSchema);

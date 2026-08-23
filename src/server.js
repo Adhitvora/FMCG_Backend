@@ -8,6 +8,7 @@ const mongoSanitize = require('express-mongo-sanitize');
 const path = require('path');
 const fs = require('fs');
 const { connectDB } = require('./configs/db.config');
+const { buildCorsOptions, getAllowedOrigins } = require('./configs/cors.config');
 const routes = require('./routes');
 const { errorHandler, notFound } = require('./middlewares/error.middleware');
 const dns = require("dns");
@@ -27,10 +28,9 @@ connectDB();
 
 // Security Middleware
 app.use(helmet());
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:5173',
-  credentials: true,
-}));
+const corsOptions = buildCorsOptions();
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(mongoSanitize());
 
 // Rate limiting
@@ -69,6 +69,8 @@ app.use(notFound);
 app.use(errorHandler);
 
 app.listen(PORT, () => {
+  const allowedOrigins = getAllowedOrigins();
+  console.log(`CORS allowed origins: ${allowedOrigins.length ? allowedOrigins.join(', ') : 'none configured'}`);
   console.log(`🚀 Server running on port ${PORT} in ${process.env.NODE_ENV || 'development'} mode`);
 });
 

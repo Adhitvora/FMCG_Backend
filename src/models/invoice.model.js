@@ -216,8 +216,10 @@ const invoiceSchema = new mongoose.Schema(
 );
 
 invoiceSchema.index({ invoiceDate: -1 });
-invoiceSchema.index({ company: 1 });
+invoiceSchema.index({ company: 1, invoiceDate: -1 });
+invoiceSchema.index({ company: 1, status: 1 });
 invoiceSchema.index({ status: 1 });
+invoiceSchema.index({ 'items.replacement': 1 });
 
 // Calculate totals before save
 invoiceSchema.pre('save', function (next) {

@@ -1,11 +1,14 @@
 const fs = require('fs');
+const mongoose = require('mongoose');
 const Settlement = require('../models/settlement.model');
 const Replacement = require('../models/replacement.model');
 const ApiError = require('../utils/apiError');
 const ApiResponse = require('../utils/apiResponse');
 const { pagination: paginationConfig } = require('../configs/app.config');
+const { isReplicaSet } = require('../configs/db.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const { createAuditLog, getClientInfo } = require('../middlewares/audit.middleware');
+const { calculateSettlement, normalizeProductRows: normalizeSettlementProductRows } = require('../services/settlementCalculation.service');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
 const {
   createTempSettlementPdfPath,
@@ -32,32 +35,24 @@ const populateSettlement = (query) => query
   .populate('createdBy', 'username role')
   .populate('completedBy', 'username role');
 
+// Lightweight populate for list views (fewer fields = faster)
+const populateSettlementList = (query) => query
+  .populate({
+    path: 'replacementId',
+    select: 'replacementId approvalDate sentDate town receivingDate',
+  })
+  .populate('partyId', 'name town')
+  .populate('companyId', 'name')
+  .select('settlementNo replacementId partyId companyId approvalType approvedValue sentValue difference settlementStatus approvedProducts companyRLNo cnNo lastSaleInvoiceNo isLocked createdAt');
+
 const normalizeProductRows = (rows = []) => {
-  if (typeof rows === 'string' && rows.trim()) rows = JSON.parse(rows);
-  if (!Array.isArray(rows)) return [];
-  return rows.map((product) => {
-    const mrp = Number(product.mrp || 0);
-    const quantity = Number(product.quantity || 0);
-    const calculatedValue = Number(product.calculatedValue || product.value || (mrp * quantity) || 0);
-    return {
-      productId: product.productId || null,
-      productName: String(product.productName || product.name || '').trim(),
-      mrp,
-      quantity,
-      unit: String(product.unit || 'pcs').trim() || 'pcs',
-      value: calculatedValue,
-      calculatedValue,
-      batchNo: String(product.batchNo || '').trim(),
-      expiryDate: product.expiryDate || null,
-      remarks: String(product.remarks || '').trim(),
-    };
-  }).filter((product) => product.productName || product.mrp || product.quantity || product.value);
+  return normalizeSettlementProductRows(rows);
 };
 
 const isSuperAdmin = (req) => req.user?.role === 'super_admin';
 
 const assertEditableSettlement = (req, settlement) => {
-  if (settlement.isLocked && !isSuperAdmin(req)) throw ApiError.forbidden('Settlement is locked. Only Super Admin can unlock/correct it.');
+  if (settlement.isLocked) throw ApiError.forbidden('Settlement is locked. Super Admin must unlock it before corrections.');
 };
 
 const findSettlementById = async (req, id) => {
@@ -68,9 +63,14 @@ const findSettlementById = async (req, id) => {
 };
 
 const hasProductMismatch = (settlement) => (
-  settlement.approvalType === 'Product'
-  && (settlement.matchDetails || []).some((row) => row.matchStatus !== 'MATCHED')
+  (settlement.productMappings || []).some((row) => !['EXACT_MATCH', 'SUBSTITUTED'].includes(row.mappingStatus))
 );
+
+const applySettlementPayload = (settlement, body = {}) => {
+  if (body.lastSaleInvoiceNo !== undefined) settlement.lastSaleInvoiceNo = body.lastSaleInvoiceNo;
+  if (body.sentProducts !== undefined) settlement.sentProducts = normalizeProductRows(body.sentProducts);
+  if (body.remarks !== undefined) settlement.remarks = body.remarks;
+};
 
 const createSettlementPdf = async (settlement) => {
   await ensureSettlementDirectories();
@@ -121,7 +121,7 @@ const getSettlements = async (req, res, next) => {
     }
 
     const [settlements, total] = await Promise.all([
-      populateSettlement(Settlement.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)),
+      populateSettlementList(Settlement.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)).lean(),
       Settlement.countDocuments(filter),
     ]);
 
@@ -139,7 +139,7 @@ const getPendingSettlements = async (req, res, next) => {
     if (req.query.party || req.query.partyId) filter.partyId = req.query.party || req.query.partyId;
     if (req.query.approvalType) filter.approvalType = req.query.approvalType;
 
-    const settlements = await populateSettlement(Settlement.find(filter).sort({ createdAt: -1 }));
+    const settlements = await populateSettlementList(Settlement.find(filter).sort({ createdAt: -1 }).limit(200)).lean();
     ApiResponse.success(res, settlements);
   } catch (error) {
     next(error);
@@ -165,9 +165,7 @@ const createSettlement = async (req, res, next) => {
     assertEditableSettlement(req, settlement);
     const oldValue = settlement.toObject();
 
-    if (req.body.lastSaleInvoiceNo !== undefined) settlement.lastSaleInvoiceNo = req.body.lastSaleInvoiceNo;
-    if (req.body.sentProducts !== undefined) settlement.sentProducts = normalizeProductRows(req.body.sentProducts);
-    if (req.body.remarks !== undefined) settlement.remarks = req.body.remarks;
+    applySettlementPayload(settlement, req.body);
     await settlement.save();
 
     settlement = await populateSettlement(Settlement.findById(settlement._id));
@@ -198,9 +196,7 @@ const updateSettlement = async (req, res, next) => {
     assertEditableSettlement(req, settlement);
     const oldValue = settlement.toObject();
 
-    if (req.body.lastSaleInvoiceNo !== undefined) settlement.lastSaleInvoiceNo = req.body.lastSaleInvoiceNo;
-    if (req.body.sentProducts !== undefined) settlement.sentProducts = normalizeProductRows(req.body.sentProducts);
-    if (req.body.remarks !== undefined) settlement.remarks = req.body.remarks;
+    applySettlementPayload(settlement, req.body);
     if (req.body.settlementStatus && ['PENDING', 'PARTIAL', 'MATCHED', 'ON_HOLD'].includes(req.body.settlementStatus)) {
       settlement.settlementStatus = req.body.settlementStatus;
     }
@@ -225,17 +221,49 @@ const updateSettlement = async (req, res, next) => {
   }
 };
 
-const completeSettlement = async (req, res, next) => {
+const calculateSettlementPreview = async (req, res, next) => {
   try {
-    let settlement = await Settlement.findById(req.params.id);
+    const settlement = await Settlement.findById(req.params.id);
+    if (!settlement) throw ApiError.notFound('Settlement not found');
+    assertCompanyAccess(req.user, settlement.companyId);
+
+    const preview = settlement.toObject();
+    if (req.body.lastSaleInvoiceNo !== undefined) preview.lastSaleInvoiceNo = req.body.lastSaleInvoiceNo;
+    if (req.body.sentProducts !== undefined) preview.sentProducts = normalizeProductRows(req.body.sentProducts);
+    if (req.body.remarks !== undefined) preview.remarks = req.body.remarks;
+
+    const calculated = calculateSettlement(preview);
+    ApiResponse.success(res, {
+      ...preview,
+      ...calculated,
+    }, 'Settlement calculated');
+  } catch (error) {
+    next(error);
+  }
+};
+
+const completeSettlement = async (req, res, next) => {
+  const session = await mongoose.startSession();
+  const useTransaction = isReplicaSet();
+  let settlementId = null;
+
+  try {
+    if (useTransaction) session.startTransaction();
+
+    let settlement = await Settlement.findById(req.params.id).session(useTransaction ? session : null);
     if (!settlement) throw ApiError.notFound('Settlement not found');
     assertCompanyAccess(req.user, settlement.companyId);
     assertEditableSettlement(req, settlement);
 
-    if (req.body.lastSaleInvoiceNo !== undefined) settlement.lastSaleInvoiceNo = req.body.lastSaleInvoiceNo;
-    if (req.body.sentProducts !== undefined) settlement.sentProducts = normalizeProductRows(req.body.sentProducts);
-    if (req.body.remarks !== undefined) settlement.remarks = req.body.remarks;
-    await settlement.save();
+    const replacement = await Replacement.findById(settlement.replacementId).session(useTransaction ? session : null);
+    if (!replacement) throw ApiError.notFound('Replacement not found');
+    assertCompanyAccess(req.user, replacement.company);
+    if (replacement.approvalStatus !== 'Approved') throw ApiError.badRequest('Company approval must be completed before settlement.');
+    if (!replacement.isDispatchLocked) throw ApiError.badRequest('Dispatch must be locked after approval before settlement can be completed.');
+
+    const oldValue = settlement.toObject();
+    applySettlementPayload(settlement, req.body);
+    await settlement.save(useTransaction ? { session } : undefined);
 
     if (!settlement.lastSaleInvoiceNo) throw ApiError.badRequest('Last sale invoice number is mandatory.');
     if (!settlement.sentProducts.length) throw ApiError.badRequest('At least one sent product is required.');
@@ -246,20 +274,19 @@ const completeSettlement = async (req, res, next) => {
       throw ApiError.badRequest('Product approval mismatch detected. Confirm mismatch or ask Super Admin to approve correction.');
     }
 
-    const oldValue = settlement.toObject();
     settlement.settlementStatus = 'SETTLED';
     settlement.settlementDate = req.body.settlementDate || new Date();
     settlement.completedAt = new Date();
     settlement.completedBy = req.user.id;
     settlement.isLocked = true;
     settlement.lockedAt = new Date();
-    await settlement.save();
+    await settlement.save(useTransaction ? { session } : undefined);
 
-    settlement = await populateSettlement(Settlement.findById(settlement._id));
+    settlement = await populateSettlement(Settlement.findById(settlement._id)).session(useTransaction ? session : null);
     const pdfInfo = await createSettlementPdf(settlement);
     settlement.pdfPath = pdfInfo.publicPath;
     settlement.pdfGeneratedAt = new Date();
-    await settlement.save();
+    await settlement.save(useTransaction ? { session } : undefined);
 
     const clientInfo = getClientInfo(req);
     await createAuditLog({
@@ -271,6 +298,7 @@ const completeSettlement = async (req, res, next) => {
       description: `Completed settlement ${settlement.settlementNo}`,
       oldValue,
       newValue: settlement.toObject(),
+      session: useTransaction ? session : null,
       ...clientInfo,
     });
     await createAuditLog({
@@ -281,12 +309,20 @@ const completeSettlement = async (req, res, next) => {
       entityId: settlement._id,
       description: `Generated settlement PDF ${settlement.settlementNo}`,
       newValue: { pdfPath: settlement.pdfPath },
+      session: useTransaction ? session : null,
       ...clientInfo,
     });
 
-    ApiResponse.success(res, settlement, 'Settlement completed');
+    settlementId = settlement._id;
+    if (useTransaction) await session.commitTransaction();
+
+    const completedSettlement = await populateSettlement(Settlement.findById(settlementId));
+    ApiResponse.success(res, completedSettlement, 'Settlement completed');
   } catch (error) {
+    if (useTransaction) await session.abortTransaction().catch(() => {});
     next(error);
+  } finally {
+    await session.endSession();
   }
 };
 
@@ -465,6 +501,7 @@ const getSettlementDashboard = async (req, res, next) => {
 };
 
 module.exports = {
+  calculateSettlementPreview,
   cancelSettlement,
   completeSettlement,
   createSettlement,

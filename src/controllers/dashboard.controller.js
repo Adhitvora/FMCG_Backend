@@ -1,6 +1,4 @@
 const Replacement = require('../models/replacement.model');
-const Invoice = require('../models/invoice.model');
-const MasterCarton = require('../models/masterCarton.model');
 const Settlement = require('../models/settlement.model');
 const ApiResponse = require('../utils/apiResponse');
 const { applyCompanyScope } = require('../utils/companyAccess');
@@ -12,49 +10,84 @@ const getDashboardStats = async (req, res, next) => {
     today.setHours(0, 0, 0, 0);
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
+    const twelveMonthsAgo = new Date();
+    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 12);
+
     const replacementBase = { status: 'active' };
     applyCompanyScope(replacementBase, req.user, 'company');
     const settlementBase = {};
     applyCompanyScope(settlementBase, req.user, 'companyId');
 
-    const [
-      todayReceived,
-      todaySent,
-      pendingApproval,
-      pendingDispatch,
-      pendingInvoice,
-      totalReceived,
-      totalSent,
-      approvalAmountResult,
-      pendingAmountResult,
-      companyWise,
-      monthlyStats,
-      partyWise,
-      topPendingParties,
-      topPendingCompanies,
-      settlementPending,
-      settlementToday,
-      settlementCompleted,
-      partialSettlement,
-      settlementOnHold,
-      settlementApprovedValue,
-      settlementSettledValue,
-      settlementPendingValue,
-    ] = await Promise.all([
-      // Today's stats
-      Replacement.countDocuments({ ...replacementBase, receivingDate: { $gte: today, $lt: tomorrow } }),
-      Replacement.countDocuments({ ...replacementBase, sentDate: { $gte: today, $lt: tomorrow } }),
-      Replacement.countDocuments({ ...replacementBase, approvalStatus: 'Pending' }),
-      Replacement.countDocuments({ ...replacementBase, sentDate: null }),
-      Replacement.countDocuments({ ...replacementBase, invoiceId: null }),
+    // Combine all replacement counts + totals into ONE aggregation using $facet
+    const [replacementFacet, settlementFacet, companyWise, monthlyStats, partyWise, topPendingParties, topPendingCompanies] = await Promise.all([
+      // Single replacement aggregation with $facet
+      Replacement.aggregate([
+        { $match: replacementBase },
+        {
+          $facet: {
+            todayReceived: [
+              { $match: { receivingDate: { $gte: today, $lt: tomorrow } } },
+              { $count: 'count' },
+            ],
+            todaySent: [
+              { $match: { sentDate: { $gte: today, $lt: tomorrow } } },
+              { $count: 'count' },
+            ],
+            pendingApproval: [
+              { $match: { approvalStatus: 'Pending' } },
+              { $count: 'count' },
+            ],
+            pendingDispatch: [
+              { $match: { sentDate: null } },
+              { $count: 'count' },
+            ],
+            pendingInvoice: [
+              { $match: { invoiceId: null } },
+              { $count: 'count' },
+            ],
+            totalCasesReceived: [
+              { $group: { _id: null, total: { $sum: '$receivingCases' } } },
+            ],
+            totalCasesSent: [
+              { $match: { sentDate: { $ne: null } } },
+              { $group: { _id: null, total: { $sum: '$dispatchCases' } } },
+            ],
+            approvalAmount: [
+              { $match: { approvalStatus: 'Approved' } },
+              { $group: { _id: null, total: { $sum: '$approvalAmount' } } },
+            ],
+            pendingAmount: [
+              { $match: { approvalStatus: 'Pending' } },
+              { $group: { _id: null, total: { $sum: '$approvalAmount' } } },
+            ],
+          },
+        },
+      ]),
 
-      // Totals
-      Replacement.aggregate([{ $match: replacementBase }, { $group: { _id: null, total: { $sum: '$receivingCases' } } }]),
-      Replacement.aggregate([{ $match: { ...replacementBase, sentDate: { $ne: null } } }, { $group: { _id: null, total: { $sum: '$dispatchCases' } } }]),
-      Replacement.aggregate([{ $match: { ...replacementBase, approvalStatus: 'Approved' } }, { $group: { _id: null, total: { $sum: '$approvalAmount' } } }]),
-      Replacement.aggregate([{ $match: { ...replacementBase, approvalStatus: 'Pending' } }, { $group: { _id: null, total: { $sum: '$approvalAmount' } } }]),
+      // Single settlement aggregation with $facet
+      Settlement.aggregate([
+        { $match: settlementBase },
+        {
+          $facet: {
+            statusCounts: [
+              {
+                $group: {
+                  _id: '$settlementStatus',
+                  count: { $sum: 1 },
+                  totalApproved: { $sum: '$approvedValue' },
+                  totalSent: { $sum: '$sentValue' },
+                },
+              },
+            ],
+            todayCompleted: [
+              { $match: { completedAt: { $gte: today, $lt: tomorrow } } },
+              { $count: 'count' },
+            ],
+          },
+        },
+      ]),
 
-      // Company wise
+      // Company wise distribution
       Replacement.aggregate([
         { $match: replacementBase },
         { $lookup: { from: 'companies', localField: 'company', foreignField: '_id', as: 'comp' } },
@@ -64,9 +97,9 @@ const getDashboardStats = async (req, res, next) => {
         { $limit: 10 },
       ]),
 
-      // Monthly (last 12 months)
+      // Monthly trend (last 12 months)
       Replacement.aggregate([
-        { $match: { ...replacementBase, receivingDate: { $gte: new Date(new Date().setMonth(new Date().getMonth() - 12)) } } },
+        { $match: { ...replacementBase, receivingDate: { $gte: twelveMonthsAgo } } },
         { $group: { _id: { $dateToString: { format: '%Y-%m', date: '$receivingDate' } }, count: { $sum: 1 }, cases: { $sum: '$receivingCases' }, amount: { $sum: '$approvalAmount' } } },
         { $sort: { _id: 1 } },
       ]),
@@ -100,36 +133,50 @@ const getDashboardStats = async (req, res, next) => {
         { $sort: { pendingCount: -1 } },
         { $limit: 5 },
       ]),
-      Settlement.countDocuments({ ...settlementBase, settlementStatus: { $nin: ['SETTLED', 'REJECTED'] } }),
-      Settlement.countDocuments({ ...settlementBase, completedAt: { $gte: today, $lt: tomorrow } }),
-      Settlement.countDocuments({ ...settlementBase, settlementStatus: 'SETTLED' }),
-      Settlement.countDocuments({ ...settlementBase, settlementStatus: 'PARTIAL' }),
-      Settlement.countDocuments({ ...settlementBase, settlementStatus: 'ON_HOLD' }),
-      Settlement.aggregate([{ $match: settlementBase }, { $group: { _id: null, total: { $sum: '$approvedValue' } } }]),
-      Settlement.aggregate([{ $match: { ...settlementBase, settlementStatus: 'SETTLED' } }, { $group: { _id: null, total: { $sum: '$sentValue' } } }]),
-      Settlement.aggregate([{ $match: { ...settlementBase, settlementStatus: { $nin: ['SETTLED', 'REJECTED'] } } }, { $group: { _id: null, total: { $sum: '$approvedValue' } } }]),
     ]);
 
+    // Parse replacement facet results
+    const rf = replacementFacet[0] || {};
+    const getCount = (arr) => arr?.[0]?.count || 0;
+    const getTotal = (arr) => arr?.[0]?.total || 0;
+
+    // Parse settlement facet results
+    const sf = settlementFacet[0] || {};
+    const statusMap = {};
+    (sf.statusCounts || []).forEach((s) => { statusMap[s._id] = s; });
+
+    const settlementPending = (statusMap.PENDING?.count || 0) + (statusMap.PARTIAL?.count || 0) + (statusMap.ON_HOLD?.count || 0) + (statusMap.MATCHED?.count || 0);
+    const totalApprovedValue = Object.values(statusMap).reduce((sum, s) => sum + (s.totalApproved || 0), 0);
+    const totalSettledValue = statusMap.SETTLED?.totalSent || 0;
+    const pendingSettlementValue = totalApprovedValue - totalSettledValue;
+
     const stats = {
-      today: { received: todayReceived, sent: todaySent },
-      pending: { approval: pendingApproval, dispatch: pendingDispatch, invoice: pendingInvoice },
+      today: {
+        received: getCount(rf.todayReceived),
+        sent: getCount(rf.todaySent),
+      },
+      pending: {
+        approval: getCount(rf.pendingApproval),
+        dispatch: getCount(rf.pendingDispatch),
+        invoice: getCount(rf.pendingInvoice),
+      },
       totals: {
-        casesReceived: totalReceived[0]?.total || 0,
-        casesSent: totalSent[0]?.total || 0,
-        approvalAmount: approvalAmountResult[0]?.total || 0,
-        pendingAmount: pendingAmountResult[0]?.total || 0,
+        casesReceived: getTotal(rf.totalCasesReceived),
+        casesSent: getTotal(rf.totalCasesSent),
+        approvalAmount: getTotal(rf.approvalAmount),
+        pendingAmount: getTotal(rf.pendingAmount),
       },
       charts: { companyWise, monthlyStats, partyWise },
       topPending: { parties: topPendingParties, companies: topPendingCompanies },
       settlements: {
         pending: settlementPending,
-        today: settlementToday,
-        completed: settlementCompleted,
-        partial: partialSettlement,
-        onHold: settlementOnHold,
-        totalApprovedValue: settlementApprovedValue[0]?.total || 0,
-        totalSettledValue: settlementSettledValue[0]?.total || 0,
-        pendingSettlementValue: settlementPendingValue[0]?.total || 0,
+        today: getCount(sf.todayCompleted),
+        completed: statusMap.SETTLED?.count || 0,
+        partial: statusMap.PARTIAL?.count || 0,
+        onHold: statusMap.ON_HOLD?.count || 0,
+        totalApprovedValue,
+        totalSettledValue,
+        pendingSettlementValue: Math.max(pendingSettlementValue, 0),
       },
     };
 

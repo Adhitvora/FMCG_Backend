@@ -1,3 +1,5 @@
+const { companyBranding, getLogoDataUri } = require('../configs/companyBranding.config');
+
 const escapeHtml = (value) => String(value ?? '')
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
@@ -22,10 +24,6 @@ const formatCurrency = (value) => new Intl.NumberFormat('en-IN', {
   maximumFractionDigits: 2,
 }).format(Number(value || 0));
 
-const companyName = () => process.env.INVOICE_BUSINESS_NAME || 'HET ARYA ENTERPRISE';
-const companyAddress = () => process.env.INVOICE_BUSINESS_ADDRESS || 'A-4 Urja Commercial Park, B/h. Audi Showroom, Navsarjan Main Road, Rajkot, Gujarat 360005';
-const companyContact = () => process.env.INVOICE_BUSINESS_CONTACT || 'Mo.: 9737351254, 9998757976 - Email: hetarya@gmail.com';
-
 const getPopulated = (value) => (value && typeof value === 'object' ? value : {});
 
 const rowsOrEmpty = (rows, columns, emptyText) => {
@@ -40,6 +38,12 @@ const buildSettlementHtml = (settlement) => {
   const invoice = getPopulated(settlement.invoiceId);
   const receivingTransport = getPopulated(replacement.receivingTransport);
   const dispatchTransport = getPopulated(replacement.dispatchTransport);
+  const logoDataUri = getLogoDataUri();
+  const companyContact = [
+    companyBranding.phone ? `Mo.: ${companyBranding.phone}` : '',
+    companyBranding.email ? `Email: ${companyBranding.email}` : '',
+    companyBranding.website || '',
+  ].filter(Boolean).join(' | ');
 
   const approvedRows = rowsOrEmpty((settlement.approvedProducts || []).map((product) => `
     <tr>
@@ -53,24 +57,41 @@ const buildSettlementHtml = (settlement) => {
   const sentRows = rowsOrEmpty((settlement.sentProducts || []).map((product) => `
     <tr>
       <td>${escapeHtml(product.productName)}</td>
-      <td class="num">${formatCurrency(product.mrp)}</td>
       <td class="num">${escapeHtml(product.quantity)} ${escapeHtml(product.unit || 'pcs')}</td>
+      <td class="num">${formatCurrency(product.mrp)}</td>
       <td class="num">${formatCurrency(product.value || product.calculatedValue)}</td>
     </tr>
   `), 4, 'No sent products recorded.');
 
-  const matchRows = rowsOrEmpty((settlement.matchDetails || []).map((row) => `
+  const comparisonRows = rowsOrEmpty((settlement.productMappings || []).map((row) => `
     <tr>
-      <td>${escapeHtml(row.approvedProduct || '-')}</td>
-      <td>${escapeHtml(row.sentProduct || '-')}</td>
-      <td class="num">${escapeHtml(row.approvedQty || 0)}</td>
-      <td class="num">${escapeHtml(row.sentQty || 0)}</td>
+      <td>${escapeHtml(row.approvedProductName || '-')}</td>
+      <td class="num">${escapeHtml(row.approvedQuantity || 0)}</td>
+      <td class="num">${formatCurrency(row.approvedMRP)}</td>
       <td class="num">${formatCurrency(row.approvedValue)}</td>
+      <td>${escapeHtml(row.sentProductName || '-')}</td>
+      <td class="num">${escapeHtml(row.sentQuantity || 0)}</td>
+      <td class="num">${row.sentMRP ? formatCurrency(row.sentMRP) : '-'}</td>
       <td class="num">${formatCurrency(row.sentValue)}</td>
-      <td class="num">${formatCurrency(row.difference)}</td>
-      <td>${escapeHtml(row.matchStatus)}</td>
+      <td class="num">${formatCurrency(row.valueDifference)}</td>
+      <td>${escapeHtml(row.mappingStatus)}</td>
     </tr>
-  `), 8, 'Product matching is not required for amount approval.');
+  `), 10, 'No product mapping rows recorded.');
+
+  const mappingCards = rowsOrEmpty((settlement.productMappings || []).map((row) => `
+    <tr>
+      <td>
+        <div class="map-wrap">
+          <div class="map-side"><strong>${escapeHtml(row.approvedProductName || '-')}</strong><span>Approved</span><span>${escapeHtml(row.approvedQuantity || 0)} pcs</span></div>
+          <div class="map-arrow">↓</div>
+          <div class="map-side"><strong>${escapeHtml(row.sentProductName || '-')}</strong><span>Sent</span><span>${escapeHtml(row.sentQuantity || 0)} pcs</span></div>
+        </div>
+      </td>
+      <td class="num">${escapeHtml(row.quantityDifference || 0)}</td>
+      <td class="num">${formatCurrency(row.valueDifference)}</td>
+      <td>${escapeHtml(row.mappingStatus)}</td>
+    </tr>
+  `), 4, 'No mapping rows recorded.');
 
   return `<!doctype html>
 <html lang="en">
@@ -91,7 +112,8 @@ html, body {
 }
 .page { width: 210mm; min-height: 297mm; padding: 10mm; }
 .frame { min-height: 277mm; border: 0.35mm solid #111827; padding: 7mm; }
-.top { text-align: center; border-bottom: 0.25mm solid #111827; padding-bottom: 4mm; }
+.top { display: grid; grid-template-columns: 22mm 1fr 22mm; align-items: center; text-align: center; border-bottom: 0.25mm solid #111827; padding-bottom: 4mm; }
+.brand-logo { width: 18mm; height: 18mm; object-fit: contain; }
 .business { font-size: 18pt; font-weight: 800; letter-spacing: 0; }
 .business-sub { font-size: 8.5pt; line-height: 1.35; margin-top: 1mm; }
 .title { margin: 4mm 0; text-align: center; font-size: 14pt; font-weight: 800; color: #1F4E79; }
@@ -108,6 +130,11 @@ html, body {
 .data th, .data td { border: 0.22mm solid #9CA3AF; padding: 1.7mm 2mm; font-size: 8.2pt; vertical-align: middle; overflow-wrap: anywhere; }
 .data th { background: #F8FAFC; text-align: left; font-weight: 800; }
 .num { text-align: right; }
+.map-wrap { display: grid; grid-template-columns: 1fr 8mm 1fr; gap: 2mm; align-items: center; }
+.map-side { border: 0.18mm solid #CBD5E1; background: #F8FAFC; padding: 1.5mm; min-height: 11mm; }
+.map-side strong, .map-side span { display: block; line-height: 1.3; }
+.map-side span { color: #4B5563; font-size: 7.2pt; }
+.map-arrow { text-align: center; font-size: 12pt; font-weight: 800; color: #1F4E79; }
 .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 2mm; margin-top: 3mm; }
 .summary .box { min-height: 10mm; }
 .status { color: #0F766E; }
@@ -121,9 +148,14 @@ html, body {
 <section class="page">
   <div class="frame">
     <div class="top">
-      <div class="business">${escapeHtml(companyName())}</div>
-      <div class="business-sub">${escapeHtml(companyAddress())}</div>
-      <div class="business-sub">${escapeHtml(companyContact())}</div>
+      <div>${logoDataUri ? `<img class="brand-logo" src="${logoDataUri}" alt="HET ARYA ENTERPRISE logo">` : ''}</div>
+      <div>
+        <div class="business">${escapeHtml(companyBranding.companyName)}</div>
+        <div class="business-sub">${escapeHtml(companyBranding.address)}</div>
+        <div class="business-sub">${escapeHtml(companyContact)}</div>
+        <div class="business-sub">GSTIN: ${escapeHtml(companyBranding.gstin)}</div>
+      </div>
+      <div></div>
     </div>
 
     <div class="title">SETTLEMENT STATEMENT</div>
@@ -175,24 +207,31 @@ html, body {
     </div>
 
     <div class="section">
-      <div class="section-title">APPROVED PRODUCT / VALUE</div>
+      <div class="section-title">COMPANY APPROVED PRODUCT / VALUE</div>
       <table class="data"><thead><tr><th>Approved Product</th><th class="num">Qty</th><th class="num">MRP</th><th class="num">Approved Value</th></tr></thead><tbody>${approvedRows}</tbody></table>
     </div>
 
     <div class="section">
-      <div class="section-title">SENT PRODUCT DETAILS</div>
-      <table class="data"><thead><tr><th>Sent Product</th><th class="num">MRP</th><th class="num">Qty</th><th class="num">Value</th></tr></thead><tbody>${sentRows}</tbody></table>
+      <div class="section-title">ACTUAL SENT PRODUCT DETAILS</div>
+      <table class="data"><thead><tr><th>Actual Sent Product</th><th class="num">Qty</th><th class="num">MRP</th><th class="num">Value</th></tr></thead><tbody>${sentRows}</tbody></table>
     </div>
 
+
     <div class="summary">
-      <div class="box"><div class="label">Approved Value</div><div class="value">${formatCurrency(settlement.approvedValue)}</div></div>
-      <div class="box"><div class="label">Sent Value</div><div class="value">${formatCurrency(settlement.sentValue)}</div></div>
-      <div class="box"><div class="label">Difference</div><div class="value">${formatCurrency(settlement.difference)}</div></div>
-      <div class="box"><div class="label">Settlement Status</div><div class="value status">${escapeHtml(settlement.settlementStatus)}</div></div>
+      <div class="box"><div class="label">Approved Qty</div><div class="value">${escapeHtml(settlement.totalApprovedQuantity || 0)}</div></div>
+      <div class="box"><div class="label">Sent Qty</div><div class="value">${escapeHtml(settlement.totalSentQuantity || 0)}</div></div>
+      <div class="box"><div class="label">Approved Value</div><div class="value">${formatCurrency(settlement.totalApprovedValue ?? settlement.approvedValue)}</div></div>
+      <div class="box"><div class="label">Sent Value</div><div class="value">${formatCurrency(settlement.totalSentValue ?? settlement.sentValue)}</div></div>
     </div>
     <div class="summary">
-      <div class="box" style="grid-column: span 2;"><div class="label">Last Sale Invoice No</div><div class="value">${escapeHtml(settlement.lastSaleInvoiceNo || '')}</div></div>
-      <div class="box" style="grid-column: span 2;"><div class="label">Settlement No</div><div class="value">${escapeHtml(settlement.settlementNo)}</div></div>
+      <div class="box"><div class="label">Value Difference</div><div class="value">${formatCurrency(settlement.totalValueDifference ?? settlement.difference)}</div></div>
+      <div class="box"><div class="label">Qty Difference</div><div class="value">${escapeHtml(settlement.totalQuantityDifference || 0)}</div></div>
+      <div class="box"><div class="label">Settlement Status</div><div class="value status">${escapeHtml(settlement.settlementStatus)}</div></div>
+      <div class="box"><div class="label">Last Sale Invoice No</div><div class="value">${escapeHtml(settlement.lastSaleInvoiceNo || '')}</div></div>
+    </div>
+    <div class="summary">
+      <div class="box" style="grid-column: span 2;"><div class="label">Prepared By</div><div class="value">${escapeHtml(getPopulated(settlement.createdBy).username || '')}</div></div>
+      <div class="box" style="grid-column: span 2;"><div class="label">Approved By</div><div class="value">${escapeHtml(getPopulated(settlement.completedBy).username || '')}</div></div>
     </div>
 
     <div class="section">

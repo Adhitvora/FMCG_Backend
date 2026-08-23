@@ -30,6 +30,8 @@ const auth = async (req, res, next) => {
       username: user.username,
       role: user.role,
       branch: user.branch,
+      company: user.company || null,
+      companies: Array.isArray(user.companies) ? user.companies : [],
     };
 
     next();
