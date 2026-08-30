@@ -18,6 +18,10 @@ dns.setServers(["1.1.1.1", "8.8.8.8"]);
 const app = express();
 const PORT = process.env.PORT || 5000;
 const uploadsRoot = path.join(__dirname, '..', 'uploads');
+const frontendDistPath = process.env.FRONTEND_DIST_PATH
+  ? path.resolve(process.env.FRONTEND_DIST_PATH)
+  : path.resolve(__dirname, '..', '..', 'frontend', 'dist');
+const frontendIndexPath = path.join(frontendDistPath, 'index.html');
 
 for (const directory of [uploadsRoot, path.join(uploadsRoot, 'invoices'), path.join(uploadsRoot, 'temp')]) {
   fs.mkdirSync(directory, { recursive: true });
@@ -63,6 +67,26 @@ app.use('/uploads', express.static(uploadsRoot));
 
 // API Routes
 app.use('/api', routes);
+
+// Static files - React production build
+if (fs.existsSync(frontendIndexPath)) {
+  app.use(express.static(frontendDistPath));
+
+  app.use((req, res, next) => {
+    const isNavigationRequest =
+      (req.method === 'GET' || req.method === 'HEAD') &&
+      req.accepts('html') &&
+      !path.extname(req.path);
+    const isApiRequest = req.path === '/api' || req.path.startsWith('/api/');
+    const isUploadRequest = req.path === '/uploads' || req.path.startsWith('/uploads/');
+
+    if (!isNavigationRequest || isApiRequest || isUploadRequest) {
+      return next();
+    }
+
+    return res.sendFile(frontendIndexPath);
+  });
+}
 
 // Error handling
 app.use(notFound);
