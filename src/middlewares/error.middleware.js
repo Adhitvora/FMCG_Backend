@@ -1,4 +1,5 @@
 const ApiError = require('../utils/apiError');
+const multer = require('multer');
 
 // Global error handler middleware
 const errorHandler = (err, req, res, next) => {
@@ -36,6 +37,19 @@ const errorHandler = (err, req, res, next) => {
   }
   if (err.name === 'TokenExpiredError') {
     error = ApiError.unauthorized('Token expired');
+  }
+
+  if (err instanceof multer.MulterError || err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      const message = req.originalUrl?.includes('/products/import')
+        ? 'Excel file is too large. Maximum allowed size is 10 MB.'
+        : 'Uploaded file is too large. Maximum allowed size is 10 MB.';
+      error = ApiError.badRequest(message);
+    } else if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+      error = ApiError.badRequest('Unexpected file field. Please upload the Excel file again.');
+    } else {
+      error = ApiError.badRequest(err.message || 'File upload failed');
+    }
   }
 
   const statusCode = error.statusCode || 500;

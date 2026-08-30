@@ -7,9 +7,30 @@ const { createAuditLog, getClientInfo } = require('../middlewares/audit.middlewa
 const { pagination: paginationConfig } = require('../configs/app.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const ExcelJS = require('exceljs');
-const path = require('path');
+const fs = require('fs');
 
 const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const loadExcelWorkbook = async (file) => {
+  const workbook = new ExcelJS.Workbook();
+  if (file.buffer) {
+    await workbook.xlsx.load(file.buffer);
+  } else if (file.path) {
+    await workbook.xlsx.readFile(file.path);
+  } else {
+    throw ApiError.internal('Uploaded file path is unavailable.');
+  }
+  return workbook;
+};
+
+const cleanupUploadedFile = async (file) => {
+  if (!file?.path) return;
+  try {
+    await fs.promises.unlink(file.path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('Failed to clean up uploaded file:', error);
+  }
+};
 
 const buildReplacementFilter = (req, partyId = null) => {
   const filter = { status: 'active' };
@@ -424,8 +445,7 @@ const importParties = async (req, res, next) => {
     if (!req.file) throw ApiError.badRequest('Excel file is required');
 
     const strategy = req.body.strategy || 'skip'; // 'skip' | 'update'
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(req.file.path);
+    const workbook = await loadExcelWorkbook(req.file);
     
     const sheet = workbook.getWorksheet(1);
 
@@ -493,6 +513,8 @@ const importParties = async (req, res, next) => {
     ApiResponse.success(res, results, 'Import completed');
   } catch (error) {
     next(error);
+  } finally {
+    await cleanupUploadedFile(req.file);
   }
 };
 

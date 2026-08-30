@@ -41,10 +41,13 @@ const normalizeProductRow = (product = {}) => {
 
   return {
     productId: product.productId || null,
-    productName: cleanString(product.productName || product.name),
+    productName: cleanString(product.productName || product.productNameSnapshot || product.name),
+    productNameSnapshot: cleanString(product.productNameSnapshot || product.productName || product.name),
     sku: cleanString(product.sku),
     productCode: cleanString(product.productCode || product.code),
     mrp,
+    mrpSnapshot: toNumber(product.mrpSnapshot || mrp),
+    masterMrpSnapshot: toNumber(product.masterMrpSnapshot),
     quantity,
     unit: cleanString(product.unit) || 'pcs',
     value,
@@ -73,7 +76,9 @@ const sumProducts = (products = []) => products.reduce((totals, product) => {
 const sentProductSnapshot = (product = {}) => ({
   sentProductId: product.productId || null,
   sentProductName: product.productName || '',
+  sentProductNameSnapshot: product.productNameSnapshot || product.productName || '',
   sentMRP: toNumber(product.mrp),
+  sentMRPSnapshot: toNumber(product.mrpSnapshot || product.mrp),
   sentQuantity: toNumber(product.quantity),
   sentValue: roundMoney(product.value || product.calculatedValue),
 });
@@ -122,14 +127,20 @@ const buildMapping = (approved, sentItems, remark = '') => {
   return {
     approvedProductId: approved?.productId || null,
     approvedProductName: approved?.productName || '',
+    approvedProductNameSnapshot: approved?.productNameSnapshot || approved?.productName || '',
     approvedMRP: toNumber(approved?.mrp),
+    approvedMRPSnapshot: toNumber(approved?.mrpSnapshot || approved?.mrp),
     approvedQuantity,
     approvedValue,
     sentProductId: isSingleSent ? firstSent.productId || null : null,
     sentProductName: isSingleSent
       ? firstSent.productName || ''
       : sentItems.map((product) => product.productName).filter(Boolean).join(', '),
+    sentProductNameSnapshot: isSingleSent
+      ? firstSent.productNameSnapshot || firstSent.productName || ''
+      : sentItems.map((product) => product.productNameSnapshot || product.productName).filter(Boolean).join(', '),
     sentMRP: isSingleSent ? toNumber(firstSent.mrp) : 0,
+    sentMRPSnapshot: isSingleSent ? toNumber(firstSent.mrpSnapshot || firstSent.mrp) : 0,
     sentQuantity: roundMoney(sentTotals.quantity),
     sentValue,
     sentItems: sentItems.map(sentProductSnapshot),
@@ -215,14 +226,20 @@ const buildAmountApprovalMapping = (approvedValue, sentProducts) => {
   return [{
     approvedProductId: null,
     approvedProductName: 'Amount Approval',
+    approvedProductNameSnapshot: 'Amount Approval',
     approvedMRP: 0,
+    approvedMRPSnapshot: 0,
     approvedQuantity: 0,
     approvedValue,
     sentProductId: sentProducts.length === 1 ? sentProducts[0].productId || null : null,
     sentProductName: sentProducts.length === 1
       ? sentProducts[0].productName || ''
       : sentProducts.map((product) => product.productName).filter(Boolean).join(', '),
+    sentProductNameSnapshot: sentProducts.length === 1
+      ? sentProducts[0].productNameSnapshot || sentProducts[0].productName || ''
+      : sentProducts.map((product) => product.productNameSnapshot || product.productName).filter(Boolean).join(', '),
     sentMRP: sentProducts.length === 1 ? toNumber(sentProducts[0].mrp) : 0,
+    sentMRPSnapshot: sentProducts.length === 1 ? toNumber(sentProducts[0].mrpSnapshot || sentProducts[0].mrp) : 0,
     sentQuantity: roundMoney(sentTotals.quantity),
     sentValue: roundMoney(sentTotals.value),
     sentItems: sentProducts.map(sentProductSnapshot),

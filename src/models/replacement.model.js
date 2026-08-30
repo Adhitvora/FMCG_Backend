@@ -117,9 +117,19 @@ const replacementSchema = new mongoose.Schema(
         default: null,
       },
       productName: { type: String, trim: true },
+      productNameSnapshot: { type: String, trim: true, default: '' },
+      sku: { type: String, trim: true, default: '' },
+      productCode: { type: String, trim: true, default: '' },
       mrp: { type: Number, min: 0, default: 0 },
+      mrpSnapshot: { type: Number, min: 0, default: 0 },
+      masterMrpSnapshot: { type: Number, min: 0, default: 0 },
       quantity: { type: Number, min: 0, default: 0 },
       totalValue: { type: Number, min: 0, default: 0 },
+      status: {
+        type: String,
+        enum: ['Approved', 'Rejected', 'Pending'],
+        default: 'Approved',
+      },
     }],
     totalProductApprovalValue: {
       type: Number,
@@ -281,6 +291,9 @@ replacementSchema.pre('validate', function (next) {
 
   if (Array.isArray(this.approvalProducts)) {
     this.approvalProducts.forEach((product) => {
+      if (!product.productNameSnapshot) product.productNameSnapshot = product.productName || '';
+      if (!product.productName) product.productName = product.productNameSnapshot || '';
+      if (!product.mrpSnapshot) product.mrpSnapshot = product.mrp || 0;
       const explicitValue = Number(product.totalValue || product.value || 0);
       const calculatedValue = Number(product.mrp || 0) * Number(product.quantity || 0);
       product.totalValue = explicitValue > 0 ? explicitValue : calculatedValue;

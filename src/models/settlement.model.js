@@ -4,9 +4,12 @@ const { calculateSettlement, MAPPING_STATUSES } = require('../services/settlemen
 const productEntrySchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   productName: { type: String, trim: true, required: true },
+  productNameSnapshot: { type: String, trim: true, default: '' },
   sku: { type: String, trim: true, default: '' },
   productCode: { type: String, trim: true, default: '' },
   mrp: { type: Number, min: 0, default: 0 },
+  mrpSnapshot: { type: Number, min: 0, default: 0 },
+  masterMrpSnapshot: { type: Number, min: 0, default: 0 },
   quantity: { type: Number, min: 0, default: 0 },
   unit: { type: String, trim: true, default: 'pcs' },
   value: { type: Number, min: 0, default: 0 },
@@ -19,7 +22,9 @@ const productEntrySchema = new mongoose.Schema({
 const sentMappingItemSchema = new mongoose.Schema({
   sentProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   sentProductName: { type: String, trim: true, default: '' },
+  sentProductNameSnapshot: { type: String, trim: true, default: '' },
   sentMRP: { type: Number, min: 0, default: 0 },
+  sentMRPSnapshot: { type: Number, min: 0, default: 0 },
   sentQuantity: { type: Number, min: 0, default: 0 },
   sentValue: { type: Number, min: 0, default: 0 },
 }, { _id: false });
@@ -27,13 +32,17 @@ const sentMappingItemSchema = new mongoose.Schema({
 const productMappingSchema = new mongoose.Schema({
   approvedProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   approvedProductName: { type: String, trim: true, default: '' },
+  approvedProductNameSnapshot: { type: String, trim: true, default: '' },
   approvedMRP: { type: Number, min: 0, default: 0 },
+  approvedMRPSnapshot: { type: Number, min: 0, default: 0 },
   approvedQuantity: { type: Number, min: 0, default: 0 },
   approvedValue: { type: Number, min: 0, default: 0 },
 
   sentProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
   sentProductName: { type: String, trim: true, default: '' },
+  sentProductNameSnapshot: { type: String, trim: true, default: '' },
   sentMRP: { type: Number, min: 0, default: 0 },
+  sentMRPSnapshot: { type: Number, min: 0, default: 0 },
   sentQuantity: { type: Number, min: 0, default: 0 },
   sentValue: { type: Number, min: 0, default: 0 },
   sentItems: [sentMappingItemSchema],

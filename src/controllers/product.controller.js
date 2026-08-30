@@ -1,14 +1,318 @@
 const Product = require('../models/product.model');
-const Replacement = require('../models/replacement.model');
-const Settlement = require('../models/settlement.model');
+const Company = require('../models/company.model');
 const ApiError = require('../utils/apiError');
 const ApiResponse = require('../utils/apiResponse');
 const { createAuditLog, getClientInfo } = require('../middlewares/audit.middleware');
 const { pagination: paginationConfig } = require('../configs/app.config');
-const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
+const { applyCompanyScope, assertCompanyAccess, getAllowedCompanyIds } = require('../utils/companyAccess');
 const ExcelJS = require('exceljs');
+const XLSX = require('xlsx');
+const fs = require('fs');
+const path = require('path');
+const mongoose = require('mongoose');
 
 const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const normalizeKey = (value) => String(value || '').trim().toLowerCase();
+const normalizeHeaderKey = (value) => normalizeKey(value).replace(/\*/g, '').replace(/[^a-z0-9]/g, '');
+
+const productImportHeaders = {
+  productname: 'name',
+  product: 'name',
+  name: 'name',
+  itemname: 'name',
+  productcode: 'productCode',
+  productcodesku: 'productCode',
+  productsku: 'productCode',
+  code: 'productCode',
+  sku: 'sku',
+  skucode: 'sku',
+  mrp: 'mrp',
+  company: 'companyName',
+  companyname: 'companyName',
+};
+
+const productImportExtensions = new Set(['.xlsx', '.xls', '.csv']);
+const productImportMimeTypes = new Set([
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-excel',
+  'text/csv',
+  'application/csv',
+  'application/octet-stream',
+  'binary/octet-stream',
+  'text/plain',
+]);
+
+const cleanCellValue = (value) => {
+  if (value === undefined || value === null) return '';
+  if (typeof value === 'object' && value.text) return String(value.text).trim();
+  if (typeof value === 'object' && value.result !== undefined) return String(value.result).trim();
+  return String(value).trim();
+};
+
+const parseOptionalMrp = (value) => {
+  const text = cleanCellValue(value);
+  if (!text) return { value: null, blank: true, valid: true };
+
+  const numeric = Number(text.replace(/[\u20b9,\s]/g, ''));
+  if (Number.isNaN(numeric) || numeric < 0) {
+    return { value: null, blank: false, valid: false };
+  }
+
+  return { value: numeric, blank: false, valid: true };
+};
+
+const getCompanyKey = (companyId) => String(companyId || 'none');
+
+const validateProductImportFile = (file) => {
+  const ext = path.extname(file.originalname || '').toLowerCase();
+  if (!productImportExtensions.has(ext)) {
+    throw ApiError.badRequest('Only .xlsx, .xls, or .csv files are allowed.');
+  }
+
+  if (file.mimetype && !productImportMimeTypes.has(file.mimetype)) {
+    throw ApiError.badRequest('Only .xlsx, .xls, or .csv files are allowed.');
+  }
+};
+
+const getUploadedFileBuffer = (file) => {
+  if (file.buffer) return file.buffer;
+  if (file.path) return fs.readFileSync(file.path);
+  throw ApiError.internal('Uploaded file path is unavailable.');
+};
+
+const cleanupUploadedFile = async (file) => {
+  if (!file?.path) return;
+  try {
+    await fs.promises.unlink(file.path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('Failed to clean up uploaded file:', error);
+  }
+};
+
+const parseProductImportRows = (file) => {
+  validateProductImportFile(file);
+
+  let workbook;
+  try {
+    workbook = XLSX.read(getUploadedFileBuffer(file), { type: 'buffer', cellDates: false });
+  } catch (error) {
+    console.error('Product Excel parse failed:', error);
+    throw ApiError.internal('Unable to process the Excel file. Please check the file format and try again.');
+  }
+
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) throw ApiError.badRequest('Excel file is empty.');
+
+  const worksheet = workbook.Sheets[sheetName];
+  const matrix = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    defval: '',
+    blankrows: false,
+    raw: false,
+  });
+
+  if (!matrix.length) throw ApiError.badRequest('Excel file is empty.');
+
+  const headerRow = matrix[0] || [];
+  const headerMap = {};
+  headerRow.forEach((header, index) => {
+    const mapped = productImportHeaders[normalizeHeaderKey(header)];
+    if (mapped && headerMap[mapped] === undefined) headerMap[mapped] = index;
+  });
+
+  const hasRecognizedHeaders = Object.keys(headerMap).length > 0;
+  const getCell = (row, key, fallbackIndex) => {
+    if (headerMap[key] === undefined && hasRecognizedHeaders) return '';
+    const index = headerMap[key] !== undefined ? headerMap[key] : fallbackIndex;
+    return cleanCellValue(row[index]);
+  };
+
+  const rows = matrix.slice(1)
+    .map((row, index) => {
+      const parsed = {
+        row: index + 2,
+        name: getCell(row, 'name', 0),
+        productCode: getCell(row, 'productCode', 1),
+        sku: getCell(row, 'sku', 2),
+        mrpText: getCell(row, 'mrp', 3),
+        companyName: getCell(row, 'companyName', 4),
+      };
+
+      return parsed;
+    })
+    .filter((row) => row.name || row.productCode || row.sku || row.mrpText || row.companyName);
+
+  if (!rows.length) throw ApiError.badRequest('Excel file is empty.');
+
+  return rows;
+};
+
+const resolveSelectedCompanyId = async (req, requestedCompanyId = null) => {
+  if (requestedCompanyId) {
+    if (!mongoose.Types.ObjectId.isValid(requestedCompanyId)) {
+      throw ApiError.badRequest('Invalid company selected.');
+    }
+    assertCompanyAccess(req.user, requestedCompanyId);
+
+    const company = await Company.findOne({ _id: requestedCompanyId, status: 'active' }).select('_id name').lean();
+    if (!company) throw ApiError.badRequest('Selected company is invalid.');
+    return String(company._id);
+  }
+
+  const allowedCompanyIds = getAllowedCompanyIds(req.user);
+  if (allowedCompanyIds && allowedCompanyIds.length === 1) {
+    return allowedCompanyIds[0];
+  }
+
+  return null;
+};
+
+const getSelectedCompanyId = async (req) => resolveSelectedCompanyId(req, req.body.companyId || null);
+
+const getCompanyMaps = async () => {
+  const companies = await Company.find({ status: 'active' }).select('_id name').lean();
+  const byId = new Map();
+  const byName = new Map();
+
+  companies.forEach((company) => {
+    byId.set(String(company._id), company);
+    byName.set(normalizeKey(company.name), company);
+  });
+
+  return { byId, byName };
+};
+
+const resolveImportCompany = ({ row, selectedCompanyId, companyMaps, user }) => {
+  if (row.companyName) {
+    const company = companyMaps.byName.get(normalizeKey(row.companyName));
+    if (!company) return { companyId: null, companyName: row.companyName, error: 'Invalid company' };
+
+    const rowCompanyId = String(company._id);
+    try {
+      assertCompanyAccess(user, rowCompanyId);
+    } catch (error) {
+      return { companyId: rowCompanyId, companyName: company.name, error: error.message };
+    }
+
+    if (selectedCompanyId && selectedCompanyId !== rowCompanyId) {
+      return { companyId: rowCompanyId, companyName: company.name, error: 'Company does not match selected company' };
+    }
+
+    return { companyId: rowCompanyId, companyName: company.name, error: null };
+  }
+
+  if (selectedCompanyId) {
+    const selectedCompany = companyMaps.byId.get(selectedCompanyId);
+    return {
+      companyId: selectedCompanyId,
+      companyName: selectedCompany?.name || '',
+      error: null,
+    };
+  }
+
+  const allowedCompanyIds = getAllowedCompanyIds(user);
+  if (allowedCompanyIds && allowedCompanyIds.length > 1) {
+    return { companyId: null, companyName: '', error: 'Company is required' };
+  }
+
+  return { companyId: null, companyName: '', error: null };
+};
+
+const buildProductImportPreview = async (req, rows) => {
+  const selectedCompanyId = await getSelectedCompanyId(req);
+  const companyMaps = await getCompanyMaps();
+  const existingProducts = await Product.find({})
+    .select('name productName sku productCode code companyId')
+    .lean();
+
+  const existingNameKeys = new Set();
+  const existingSkuKeys = new Set();
+  const existingCodeKeys = new Set();
+
+  existingProducts.forEach((product) => {
+    const companyKey = getCompanyKey(product.companyId);
+    const names = [product.name, product.productName].map(normalizeKey).filter(Boolean);
+    names.forEach((name) => existingNameKeys.add(`${companyKey}:${name}`));
+
+    const sku = normalizeKey(product.sku);
+    if (sku) existingSkuKeys.add(`${companyKey}:${sku}`);
+
+    [product.productCode, product.code].map(normalizeKey).filter(Boolean)
+      .forEach((code) => existingCodeKeys.add(`${companyKey}:${code}`));
+  });
+
+  const seenNames = new Set();
+  const seenSkus = new Set();
+  const seenCodes = new Set();
+
+  const preview = rows.map((row) => {
+    const errors = [];
+    const mrp = parseOptionalMrp(row.mrpText);
+    const company = resolveImportCompany({ row, selectedCompanyId, companyMaps, user: req.user });
+    const companyKey = getCompanyKey(company.companyId);
+    const nameKey = normalizeKey(row.name);
+    const skuKey = normalizeKey(row.sku);
+    const codeKey = normalizeKey(row.productCode);
+
+    if (!row.name) errors.push('Product name is required');
+    if (!mrp.valid) errors.push('Invalid MRP');
+    if (company.error) errors.push(company.error);
+
+    if (nameKey) {
+      const key = `${companyKey}:${nameKey}`;
+      if (existingNameKeys.has(key)) errors.push('Product already exists');
+      if (seenNames.has(key)) errors.push('Duplicate product in Excel');
+      seenNames.add(key);
+    }
+
+    if (skuKey) {
+      const key = `${companyKey}:${skuKey}`;
+      if (existingSkuKeys.has(key)) errors.push('SKU already exists');
+      if (seenSkus.has(key)) errors.push('Duplicate SKU in Excel');
+      seenSkus.add(key);
+    }
+
+    if (codeKey) {
+      const key = `${companyKey}:${codeKey}`;
+      if (existingCodeKeys.has(key)) errors.push('Product code already exists');
+      if (seenCodes.has(key)) errors.push('Duplicate product code in Excel');
+      seenCodes.add(key);
+    }
+
+    return {
+      row: row.row,
+      name: row.name,
+      productName: row.name,
+      productCode: row.productCode,
+      sku: row.sku,
+      mrp: mrp.blank ? null : mrp.value,
+      companyId: company.companyId,
+      companyName: company.companyName,
+      status: errors.length ? 'Invalid' : 'Valid',
+      errors,
+      error: errors[0] || '',
+      reason: errors.join('; '),
+    };
+  });
+
+  const validRows = preview.filter((row) => row.status === 'Valid');
+  const invalidRows = preview.filter((row) => row.status === 'Invalid');
+
+  return {
+    preview,
+    validRows,
+    invalidRows,
+    validCount: validRows.length,
+    errorCount: invalidRows.length,
+    totalRows: preview.length,
+  };
+};
+
+const handleProductImportError = (error, next, context) => {
+  if (error instanceof ApiError) return next(error);
+  console.error(context, error);
+  return next(ApiError.internal('Unable to process the Excel file. Please check the file format and try again.'));
+};
 
 const getSearchRegex = (req) => {
   const term = String(req.query.search || req.query.q || '').trim();
@@ -16,8 +320,8 @@ const getSearchRegex = (req) => {
 };
 
 const normalizeProduct = (product, source = 'master') => ({
-  _id: product._id || `${source}:${product.companyId || product.company || 'any'}:${product.productName || product.name}:${product.mrp || 0}`,
-  productId: product._id || product.productId || null,
+  _id: product._id,
+  productId: product._id,
   name: product.name || product.productName || '',
   productName: product.productName || product.name || '',
   sku: product.sku || '',
@@ -28,72 +332,6 @@ const normalizeProduct = (product, source = 'master') => ({
   status: product.status || 'active',
   source,
 });
-
-const addUniqueProduct = (target, product) => {
-  const key = [
-    String(product.productId || ''),
-    String(product.productName || product.name || '').trim().toLowerCase(),
-    Number(product.mrp || 0),
-    String(product.companyId || ''),
-  ].join('|');
-
-  if (!product.productName && !product.name) return;
-  if (target.has(key)) return;
-  target.set(key, product);
-};
-
-const getHistoricalProducts = async ({ regex, companyId, user, limit }) => {
-  const replacementFilter = {};
-  const settlementFilter = {};
-
-  if (companyId) {
-    assertCompanyAccess(user, companyId);
-    replacementFilter.company = companyId;
-    settlementFilter.companyId = companyId;
-  } else {
-    applyCompanyScope(replacementFilter, user, 'company');
-    applyCompanyScope(settlementFilter, user, 'companyId');
-  }
-
-  const [replacements, settlements] = await Promise.all([
-    Replacement.find({
-      ...replacementFilter,
-      approvalProducts: { $elemMatch: regex ? { productName: regex } : { productName: { $exists: true, $ne: '' } } },
-    }).select('company approvalProducts').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Settlement.find({
-      ...settlementFilter,
-      $or: [
-        { approvedProducts: { $elemMatch: regex ? { productName: regex } : { productName: { $exists: true, $ne: '' } } } },
-        { sentProducts: { $elemMatch: regex ? { productName: regex } : { productName: { $exists: true, $ne: '' } } } },
-      ],
-    }).select('companyId approvedProducts sentProducts').sort({ updatedAt: -1 }).limit(limit).lean(),
-  ]);
-
-  const rows = [];
-  replacements.forEach((replacement) => {
-    (replacement.approvalProducts || []).forEach((product) => {
-      if (regex && !regex.test(product.productName || '')) return;
-      rows.push(normalizeProduct({
-        ...product,
-        name: product.productName,
-        companyId: replacement.company,
-      }, 'approval_history'));
-    });
-  });
-
-  settlements.forEach((settlement) => {
-    [...(settlement.approvedProducts || []), ...(settlement.sentProducts || [])].forEach((product) => {
-      if (regex && !regex.test(product.productName || '')) return;
-      rows.push(normalizeProduct({
-        ...product,
-        name: product.productName,
-        companyId: settlement.companyId,
-      }, 'settlement_history'));
-    });
-  });
-
-  return rows;
-};
 
 // GET /api/products — Paginated product list (Product Register)
 const getProducts = async (req, res, next) => {
@@ -153,12 +391,11 @@ const getProduct = async (req, res, next) => {
 // POST /api/products
 const createProduct = async (req, res, next) => {
   try {
-    const { name, productName, sku, productCode, code, mrp, companyId, company } = req.body;
+    const { name, productName, sku, productCode, code, mrp, companyId, company, status } = req.body;
     const finalName = name || productName;
     if (!finalName) throw ApiError.badRequest('Product name is required');
 
-    const finalCompanyId = companyId || company || null;
-    if (finalCompanyId) assertCompanyAccess(req.user, finalCompanyId);
+    const finalCompanyId = await resolveSelectedCompanyId(req, companyId || company || null);
 
     // Duplicate check
     const existing = await Product.findOne({
@@ -176,6 +413,7 @@ const createProduct = async (req, res, next) => {
       mrp: mrp !== undefined && mrp !== '' ? Number(mrp) : 0,
       companyId: finalCompanyId,
       company: finalCompanyId,
+      status: status === 'inactive' ? 'inactive' : 'active',
     });
 
     const clientInfo = getClientInfo(req);
@@ -227,23 +465,25 @@ const updateProduct = async (req, res, next) => {
   }
 };
 
-// DELETE /api/products/:id
+// DELETE /api/products/:id - deactivate only; historical transactions keep their snapshots.
 const deleteProduct = async (req, res, next) => {
   try {
     const product = await Product.findById(req.params.id);
     if (!product) throw ApiError.notFound('Product not found');
 
-    await Product.findByIdAndDelete(req.params.id);
+    const oldValue = product.toObject();
+    product.status = 'inactive';
+    await product.save();
 
     const clientInfo = getClientInfo(req);
     await createAuditLog({
       userId: req.user.id, username: req.user.username,
-      action: 'DELETE', entity: 'Product', entityId: product._id,
-      description: `Deleted product: ${product.name}`,
-      oldValue: product.toObject(), ...clientInfo,
+      action: 'DEACTIVATE', entity: 'Product', entityId: product._id,
+      description: `Deactivated product: ${product.name}`,
+      oldValue, newValue: product.toObject(), ...clientInfo,
     });
 
-    ApiResponse.success(res, null, 'Product deleted successfully');
+    ApiResponse.success(res, product, 'Product deactivated successfully');
   } catch (error) {
     next(error);
   }
@@ -278,7 +518,7 @@ const searchProducts = async (req, res, next) => {
 
     const [masterProducts, total] = await Promise.all([
       Product.find(productFilter)
-        .select('name productName sku productCode code mrp companyId')
+        .select('name productName sku productCode code mrp companyId status')
         .sort({ name: 1 })
         .skip(skip)
         .limit(limit)
@@ -286,17 +526,7 @@ const searchProducts = async (req, res, next) => {
       Product.countDocuments(productFilter),
     ]);
 
-    // Only fetch historical on first page with a search term
-    let allProducts;
-    if (page === 1 && regex) {
-      const historicalProducts = await getHistoricalProducts({ regex, companyId, user: req.user, limit: 20 });
-      const uniqueProducts = new Map();
-      masterProducts.forEach((product) => addUniqueProduct(uniqueProducts, normalizeProduct(product, 'master')));
-      historicalProducts.forEach((product) => addUniqueProduct(uniqueProducts, product));
-      allProducts = [...uniqueProducts.values()].slice(0, limit);
-    } else {
-      allProducts = masterProducts.map((p) => normalizeProduct(p, 'master'));
-    }
+    const allProducts = masterProducts.map((p) => normalizeProduct(p, 'master'));
 
     ApiResponse.success(res, {
       items: allProducts,
@@ -321,14 +551,15 @@ const downloadSampleExcel = async (req, res, next) => {
       { header: 'Product Code', key: 'productCode', width: 20 },
       { header: 'SKU', key: 'sku', width: 20 },
       { header: 'MRP', key: 'mrp', width: 12 },
+      { header: 'Company', key: 'company', width: 25 },
     ];
 
     sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
     sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0D1B2A' } };
 
-    sheet.addRow({ name: 'CTC-1468', productCode: 'CTC1468', sku: 'CTC-1468-100', mrp: 100 });
-    sheet.addRow({ name: 'ATCC-1500', productCode: 'ATCC1500', sku: 'ATCC-1500-150', mrp: 150 });
-    sheet.addRow({ name: '250g Kashmiri Chilli Powder', productCode: 'KCP250', sku: '', mrp: '' });
+    sheet.addRow({ name: 'CTC-1468', productCode: 'CTC1468', sku: 'CTC-1468-100', mrp: 100, company: 'Company A' });
+    sheet.addRow({ name: 'ATCC-1500', productCode: 'ATCC1500', sku: 'ATCC-1500-150', mrp: 150, company: 'Company A' });
+    sheet.addRow({ name: '250g Kashmiri Chilli Powder', productCode: 'KCP250', sku: '', mrp: '', company: 'Company A' });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=product_sample.xlsx');
@@ -342,123 +573,62 @@ const downloadSampleExcel = async (req, res, next) => {
 // POST /api/products/import/preview — Preview import before saving
 const previewImport = async (req, res, next) => {
   try {
-    if (!req.file) throw ApiError.badRequest('Excel/CSV file is required');
+    if (!req.file) throw ApiError.badRequest('Excel file is required.');
 
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(req.file.path);
-    const sheet = workbook.getWorksheet(1);
-    if (!sheet) throw ApiError.badRequest('No worksheet found');
+    const rows = parseProductImportRows(req.file);
+    const result = await buildProductImportPreview(req, rows);
 
-    const preview = [];
-    const existingNames = new Set();
-
-    // Pre-fetch existing products for duplicate detection
-    const allProducts = await Product.find({}).select('name companyId').lean();
-    allProducts.forEach((p) => existingNames.add(String(p.name || '').trim().toLowerCase()));
-
-    const seenInFile = new Set();
-
-    sheet.eachRow((row, rowNumber) => {
-      if (rowNumber === 1) return;
-
-      const name = row.getCell(1).value?.toString()?.trim() || '';
-      const productCode = row.getCell(2).value?.toString()?.trim() || '';
-      const sku = row.getCell(3).value?.toString()?.trim() || '';
-      const mrpRaw = row.getCell(4).value;
-      const mrp = mrpRaw !== undefined && mrpRaw !== null && mrpRaw !== '' ? Number(mrpRaw) : null;
-
-      const errors = [];
-      if (!name) errors.push('Product name is required');
-      if (mrp !== null && (isNaN(mrp) || mrp < 0)) errors.push('Invalid MRP');
-      if (name && existingNames.has(name.toLowerCase())) errors.push('Duplicate product in database');
-      if (name && seenInFile.has(name.toLowerCase())) errors.push('Duplicate in file');
-
-      if (name) seenInFile.add(name.toLowerCase());
-
-      preview.push({
-        row: rowNumber,
-        name,
-        productCode,
-        sku,
-        mrp: mrp !== null && !isNaN(mrp) ? mrp : null,
-        status: errors.length === 0 ? 'valid' : 'error',
-        errors,
-      });
-    });
-
-    const validCount = preview.filter((r) => r.status === 'valid').length;
-    const errorCount = preview.filter((r) => r.status === 'error').length;
-
-    ApiResponse.success(res, { preview, validCount, errorCount, totalRows: preview.length });
+    ApiResponse.success(res, {
+      preview: result.preview,
+      validCount: result.validCount,
+      errorCount: result.errorCount,
+      totalRows: result.totalRows,
+    }, 'Excel parsed successfully');
   } catch (error) {
-    next(error);
+    handleProductImportError(error, next, 'Product import preview failed:');
+  } finally {
+    await cleanupUploadedFile(req.file);
   }
 };
 
 // POST /api/products/import
 const importProducts = async (req, res, next) => {
   try {
-    if (!req.file) throw ApiError.badRequest('Excel/CSV file is required');
+    if (!req.file) throw ApiError.badRequest('Excel file is required.');
 
-    const companyId = req.body.companyId || null;
-    if (companyId) assertCompanyAccess(req.user, companyId);
+    const rows = parseProductImportRows(req.file);
+    const validation = await buildProductImportPreview(req, rows);
+    const productsToInsert = validation.validRows.map((row) => ({
+      name: row.name,
+      productName: row.name,
+      productCode: row.productCode,
+      code: row.productCode,
+      sku: row.sku,
+      mrp: row.mrp === null ? 0 : row.mrp,
+      companyId: row.companyId || null,
+      company: row.companyId || null,
+      status: 'active',
+    }));
 
-    const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.readFile(req.file.path);
-    const sheet = workbook.getWorksheet(1);
-    if (!sheet) throw ApiError.badRequest('No worksheet found');
-
-    const results = { inserted: 0, skipped: 0, errors: [] };
-    const rows = [];
-
-    sheet.eachRow((row, rowNumber) => {
-      if (rowNumber === 1) return;
-
-      const name = row.getCell(1).value?.toString()?.trim() || '';
-      const productCode = row.getCell(2).value?.toString()?.trim() || '';
-      const sku = row.getCell(3).value?.toString()?.trim() || '';
-      const mrpRaw = row.getCell(4).value;
-      const mrp = mrpRaw !== undefined && mrpRaw !== null && mrpRaw !== '' ? Number(mrpRaw) : 0;
-
-      if (!name) {
-        results.errors.push({ row: rowNumber, name: '', message: 'Product name is required' });
-        return;
-      }
-      if (isNaN(mrp) || mrp < 0) {
-        results.errors.push({ row: rowNumber, name, message: 'Invalid MRP value' });
-        return;
-      }
-
-      rows.push({ rowNumber, name, productCode, sku, mrp });
-    });
-
-    for (const row of rows) {
-      try {
-        const existing = await Product.findOne({
-          name: { $regex: `^${escapeRegExp(row.name)}$`, $options: 'i' },
-          companyId: companyId || null,
-        });
-
-        if (existing) {
-          results.skipped++;
-          results.errors.push({ row: row.rowNumber, name: row.name, message: 'Product already exists' });
-        } else {
-          await Product.create({
-            name: row.name,
-            productName: row.name,
-            productCode: row.productCode,
-            code: row.productCode,
-            sku: row.sku,
-            mrp: row.mrp,
-            companyId: companyId,
-            company: companyId,
-          });
-          results.inserted++;
-        }
-      } catch (err) {
-        results.errors.push({ row: row.rowNumber, name: row.name, message: err.message });
-      }
+    if (!productsToInsert.length) {
+      throw ApiError.badRequest('No valid product rows to import.', validation.invalidRows);
     }
+
+    const insertedProducts = await Product.insertMany(productsToInsert, { ordered: false });
+    const results = {
+      inserted: insertedProducts.length,
+      updated: 0,
+      skipped: validation.invalidRows.length,
+      errors: validation.invalidRows.map((row) => ({
+        row: row.row,
+        name: row.name,
+        productName: row.name,
+        error: row.error,
+        reason: row.reason,
+        message: row.reason,
+      })),
+      preview: validation.preview,
+    };
 
     const clientInfo = getClientInfo(req);
     await createAuditLog({
@@ -468,9 +638,11 @@ const importProducts = async (req, res, next) => {
       newValue: results, ...clientInfo,
     });
 
-    ApiResponse.success(res, results, 'Import completed');
+    ApiResponse.success(res, results, 'Products imported successfully');
   } catch (error) {
-    next(error);
+    handleProductImportError(error, next, 'Product import failed:');
+  } finally {
+    await cleanupUploadedFile(req.file);
   }
 };
 

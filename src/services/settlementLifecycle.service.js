@@ -12,7 +12,12 @@ const buildApprovedProductsFromReplacement = (replacement) => {
     return (replacement.approvalProducts || []).map((product) => ({
       productId: product.productId || null,
       productName: product.productName || '',
+      productNameSnapshot: product.productNameSnapshot || product.productName || '',
+      sku: product.sku || '',
+      productCode: product.productCode || '',
       mrp: Number(product.mrp || 0),
+      mrpSnapshot: Number(product.mrpSnapshot || product.mrp || 0),
+      masterMrpSnapshot: Number(product.masterMrpSnapshot || 0),
       quantity: Number(product.quantity || 0),
       unit: product.unit || 'pcs',
       value: Number(product.totalValue || product.value || (Number(product.mrp || 0) * Number(product.quantity || 0))),

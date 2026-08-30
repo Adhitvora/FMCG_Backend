@@ -24,7 +24,7 @@ const diskStorage = multer.diskStorage({
       uploadDir = path.join(uploadDir, 'images');
     } else if (file.fieldname === 'documents' || file.fieldname === 'approvalDocuments' || file.fieldname === 'receiveDocuments') {
       uploadDir = path.join(uploadDir, 'documents');
-    } else if (file.fieldname === 'excelFile') {
+    } else if (file.fieldname === 'excelFile' || file.fieldname === 'file') {
       uploadDir = path.join(uploadDir, 'imports');
     } else {
       uploadDir = path.join(uploadDir, 'misc');
@@ -51,9 +51,17 @@ const fileFilter = (req, file, cb) => {
     'application/pdf',
     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // xlsx
     'application/vnd.ms-excel', // xls
+    'text/csv',
+    'application/csv',
   ];
+  const excelExtensions = ['.xlsx', '.xls', '.csv'];
+  const excelMimeFallbacks = ['application/octet-stream', 'binary/octet-stream', 'text/plain'];
+  const ext = path.extname(file.originalname || '').toLowerCase();
 
-  if (allowedTypes.includes(file.mimetype)) {
+  if (
+    allowedTypes.includes(file.mimetype)
+    || (excelExtensions.includes(ext) && excelMimeFallbacks.includes(file.mimetype))
+  ) {
     cb(null, true);
   } else {
     cb(new ApiError(400, `File type ${file.mimetype} is not allowed`), false);

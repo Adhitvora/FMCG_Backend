@@ -9,6 +9,7 @@ const { createAuditLog, getClientInfo } = require('../middlewares/audit.middlewa
 const { pagination: paginationConfig } = require('../configs/app.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
+const { validateActiveProductSelections } = require('../utils/productSelection');
 
 // Generate replacement ID: REP-20260802-00001
 const generateReplacementId = async () => {
@@ -378,18 +379,30 @@ const updateApproval = async (req, res, next) => {
       replacement.totalProductApprovalValue = 0;
     } else {
       if (!Array.isArray(approvalProducts)) approvalProducts = [];
-      const normalizedProducts = approvalProducts
+      const selectedProducts = await validateActiveProductSelections({
+        rows: approvalProducts,
+        user: req.user,
+        companyId: replacement.company,
+        label: 'Approved product',
+      });
+      const normalizedProducts = selectedProducts
         .map((product) => ({
-          productId: product.productId || null,
-          productName: String(product.productName || product.name || '').trim(),
+          productId: product.productId,
+          productName: String(product.productNameSnapshot || product.productName || '').trim(),
+          productNameSnapshot: String(product.productNameSnapshot || product.productName || '').trim(),
+          sku: product.sku || '',
+          productCode: product.productCode || product.code || '',
           mrp: Number(product.mrp || 0),
+          mrpSnapshot: Number(product.mrpSnapshot || product.mrp || 0),
+          masterMrpSnapshot: Number(product.masterMrpSnapshot || 0),
           quantity: Number(product.quantity || 0),
           totalValue: Number(product.totalValue || product.value || product.calculatedValue || 0),
+          status: ['Approved', 'Rejected', 'Pending'].includes(product.status) ? product.status : 'Approved',
         }))
-        .filter((product) => product.productName || product.mrp || product.quantity);
+        .filter((product) => product.productId || product.mrp || product.quantity);
       if (normalizedProducts.length === 0) throw ApiError.badRequest('At least one product approval row is required.');
       normalizedProducts.forEach((product) => {
-        if (!product.productName) throw ApiError.badRequest('Product name is required.');
+        if (!product.productId) throw ApiError.badRequest('Product selection is required.');
         if (Number.isNaN(product.mrp) || product.mrp < 0) throw ApiError.badRequest('MRP must be numeric and non-negative.');
         if (Number.isNaN(product.quantity) || product.quantity < 0) throw ApiError.badRequest('Quantity must be numeric and non-negative.');
         if (!product.totalValue) product.totalValue = product.mrp * product.quantity;

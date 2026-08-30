@@ -10,6 +10,7 @@ const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAcce
 const { createAuditLog, getClientInfo } = require('../middlewares/audit.middleware');
 const { calculateSettlement, normalizeProductRows: normalizeSettlementProductRows } = require('../services/settlementCalculation.service');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
+const { validateActiveProductSelections } = require('../utils/productSelection');
 const {
   createTempSettlementPdfPath,
   ensureSettlementDirectories,
@@ -45,8 +46,14 @@ const populateSettlementList = (query) => query
   .populate('companyId', 'name')
   .select('settlementNo replacementId partyId companyId approvalType approvedValue sentValue difference settlementStatus approvedProducts companyRLNo cnNo lastSaleInvoiceNo isLocked createdAt');
 
-const normalizeProductRows = (rows = []) => {
-  return normalizeSettlementProductRows(rows);
+const normalizeProductRows = async (rows = [], req, companyId) => {
+  const selectedRows = await validateActiveProductSelections({
+    rows,
+    user: req.user,
+    companyId,
+    label: 'Sent product',
+  });
+  return normalizeSettlementProductRows(selectedRows);
 };
 
 const isSuperAdmin = (req) => req.user?.role === 'super_admin';
@@ -66,9 +73,9 @@ const hasProductMismatch = (settlement) => (
   (settlement.productMappings || []).some((row) => !['EXACT_MATCH', 'SUBSTITUTED'].includes(row.mappingStatus))
 );
 
-const applySettlementPayload = (settlement, body = {}) => {
+const applySettlementPayload = async (req, settlement, body = {}) => {
   if (body.lastSaleInvoiceNo !== undefined) settlement.lastSaleInvoiceNo = body.lastSaleInvoiceNo;
-  if (body.sentProducts !== undefined) settlement.sentProducts = normalizeProductRows(body.sentProducts);
+  if (body.sentProducts !== undefined) settlement.sentProducts = await normalizeProductRows(body.sentProducts, req, settlement.companyId);
   if (body.remarks !== undefined) settlement.remarks = body.remarks;
 };
 
@@ -165,7 +172,7 @@ const createSettlement = async (req, res, next) => {
     assertEditableSettlement(req, settlement);
     const oldValue = settlement.toObject();
 
-    applySettlementPayload(settlement, req.body);
+    await applySettlementPayload(req, settlement, req.body);
     await settlement.save();
 
     settlement = await populateSettlement(Settlement.findById(settlement._id));
@@ -196,7 +203,7 @@ const updateSettlement = async (req, res, next) => {
     assertEditableSettlement(req, settlement);
     const oldValue = settlement.toObject();
 
-    applySettlementPayload(settlement, req.body);
+    await applySettlementPayload(req, settlement, req.body);
     if (req.body.settlementStatus && ['PENDING', 'PARTIAL', 'MATCHED', 'ON_HOLD'].includes(req.body.settlementStatus)) {
       settlement.settlementStatus = req.body.settlementStatus;
     }
@@ -229,7 +236,7 @@ const calculateSettlementPreview = async (req, res, next) => {
 
     const preview = settlement.toObject();
     if (req.body.lastSaleInvoiceNo !== undefined) preview.lastSaleInvoiceNo = req.body.lastSaleInvoiceNo;
-    if (req.body.sentProducts !== undefined) preview.sentProducts = normalizeProductRows(req.body.sentProducts);
+    if (req.body.sentProducts !== undefined) preview.sentProducts = await normalizeProductRows(req.body.sentProducts, req, settlement.companyId);
     if (req.body.remarks !== undefined) preview.remarks = req.body.remarks;
 
     const calculated = calculateSettlement(preview);
@@ -262,7 +269,7 @@ const completeSettlement = async (req, res, next) => {
     if (!replacement.isDispatchLocked) throw ApiError.badRequest('Dispatch must be locked after approval before settlement can be completed.');
 
     const oldValue = settlement.toObject();
-    applySettlementPayload(settlement, req.body);
+    await applySettlementPayload(req, settlement, req.body);
     await settlement.save(useTransaction ? { session } : undefined);
 
     if (!settlement.lastSaleInvoiceNo) throw ApiError.badRequest('Last sale invoice number is mandatory.');
