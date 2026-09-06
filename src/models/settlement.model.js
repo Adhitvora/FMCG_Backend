@@ -14,6 +14,7 @@ const productEntrySchema = new mongoose.Schema({
   unit: { type: String, trim: true, default: 'pcs' },
   value: { type: Number, min: 0, default: 0 },
   calculatedValue: { type: Number, min: 0, default: 0 },
+  calculationMode: { type: String, enum: ['QTY', 'VALUE'], default: undefined },
   batchNo: { type: String, trim: true, default: '' },
   expiryDate: { type: Date, default: null },
   remarks: { type: String, trim: true, default: '' },

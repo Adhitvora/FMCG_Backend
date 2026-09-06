@@ -1,4 +1,30 @@
 const mongoose = require('mongoose');
+const {
+  normalizeProductRows: normalizeSettlementProductRows,
+  roundMoney,
+} = require('../services/settlementCalculation.service');
+
+const approvalCalculationMode = (mode) => (mode === 'VALUE' ? 'VALUE' : 'QTY');
+
+const approvalProductValueSource = (product = {}) => (
+  product.value || product.calculatedValue || product.totalValue || ''
+);
+
+const normalizeApprovalProduct = (product = {}) => {
+  const plainProduct = product.toObject ? product.toObject({ depopulate: true }) : product;
+  const value = approvalProductValueSource(plainProduct);
+  return normalizeSettlementProductRows([{
+    ...plainProduct,
+    value,
+    calculatedValue: value,
+    totalValue: value,
+    calculationMode: approvalCalculationMode(plainProduct.calculationMode),
+  }], {
+    label: 'Approved product row',
+    strictNumeric: true,
+    useCalculationMode: true,
+  })[0] || null;
+};
 
 const replacementSchema = new mongoose.Schema(
   {
@@ -124,7 +150,10 @@ const replacementSchema = new mongoose.Schema(
       mrpSnapshot: { type: Number, min: 0, default: 0 },
       masterMrpSnapshot: { type: Number, min: 0, default: 0 },
       quantity: { type: Number, min: 0, default: 0 },
+      value: { type: Number, min: 0, default: undefined },
+      calculatedValue: { type: Number, min: 0, default: undefined },
       totalValue: { type: Number, min: 0, default: 0 },
+      calculationMode: { type: String, enum: ['QTY', 'VALUE'], default: undefined },
       status: {
         type: String,
         enum: ['Approved', 'Rejected', 'Pending'],
@@ -290,15 +319,25 @@ replacementSchema.pre('validate', function (next) {
   }
 
   if (Array.isArray(this.approvalProducts)) {
+    const shouldRecalculateProductValues = this.isNew || this.isModified('approvalProducts') || this.isModified('approvalType');
     this.approvalProducts.forEach((product) => {
       if (!product.productNameSnapshot) product.productNameSnapshot = product.productName || '';
       if (!product.productName) product.productName = product.productNameSnapshot || '';
       if (!product.mrpSnapshot) product.mrpSnapshot = product.mrp || 0;
-      const explicitValue = Number(product.totalValue || product.value || 0);
-      const calculatedValue = Number(product.mrp || 0) * Number(product.quantity || 0);
-      product.totalValue = explicitValue > 0 ? explicitValue : calculatedValue;
+      if (shouldRecalculateProductValues) {
+        const calculatedProduct = normalizeApprovalProduct(product);
+        const calculatedValue = roundMoney(calculatedProduct?.value || calculatedProduct?.calculatedValue || 0);
+        product.mrp = calculatedProduct?.mrp || 0;
+        product.mrpSnapshot = calculatedProduct?.mrpSnapshot || product.mrp || 0;
+        product.masterMrpSnapshot = calculatedProduct?.masterMrpSnapshot || product.masterMrpSnapshot || 0;
+        product.quantity = calculatedProduct?.quantity || 0;
+        product.value = calculatedValue;
+        product.calculatedValue = calculatedValue;
+        product.totalValue = calculatedValue;
+        product.calculationMode = approvalCalculationMode(calculatedProduct?.calculationMode);
+      }
     });
-    this.totalProductApprovalValue = this.approvalProducts.reduce((sum, product) => sum + (product.totalValue || 0), 0);
+    this.totalProductApprovalValue = roundMoney(this.approvalProducts.reduce((sum, product) => sum + Number(product.totalValue || product.value || product.calculatedValue || 0), 0));
   }
 
   next();

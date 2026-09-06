@@ -1,3 +1,5 @@
+const ApiError = require('../utils/apiError');
+
 const MAPPING_STATUSES = [
   'EXACT_MATCH',
   'SUBSTITUTED',
@@ -10,11 +12,129 @@ const MAPPING_STATUSES = [
   'MANUAL_APPROVAL',
 ];
 
-const roundMoney = (value) => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100;
+const CALCULATION_MODES = {
+  QTY: 'QTY',
+  VALUE: 'VALUE',
+};
+
+const MRP_SCALE = 4;
+const QTY_SCALE = 4;
+const VALUE_SCALE = 2;
+
+const pow10 = (scale) => 10n ** BigInt(scale);
+
+const parseDecimalUnits = (value, scale, fieldName = 'Value', { blankAsZero = true } = {}) => {
+  if (value === undefined || value === '') return blankAsZero ? 0n : null;
+  if (value === null) throw ApiError.badRequest(`${fieldName} is required.`);
+
+  const text = String(value).trim().replace(/,/g, '');
+  if (!text) return blankAsZero ? 0n : null;
+  if (text.startsWith('-')) throw ApiError.badRequest(`${fieldName} must be greater than or equal to 0.`);
+  if (!/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) throw ApiError.badRequest(`${fieldName} must be a valid number.`);
+
+  const [wholeRaw = '0', fractionRaw = ''] = text.split('.');
+  const whole = wholeRaw || '0';
+  const fraction = fractionRaw.slice(0, scale).padEnd(scale, '0');
+  const roundDigit = Number(fractionRaw[scale] || 0);
+  let units = BigInt(whole) * pow10(scale) + BigInt(fraction || '0');
+  if (roundDigit >= 5) units += 1n;
+  return units;
+};
+
+const roundDivide = (numerator, denominator) => {
+  if (denominator <= 0n) return null;
+  const quotient = numerator / denominator;
+  const remainder = numerator % denominator;
+  return quotient + (remainder * 2n >= denominator ? 1n : 0n);
+};
+
+const roundScale = (units, fromScale, toScale) => {
+  if (fromScale === toScale) return units;
+  if (fromScale < toScale) return units * pow10(toScale - fromScale);
+  return roundDivide(units, pow10(fromScale - toScale));
+};
+
+const formatUnits = (units, scale) => {
+  const divisor = pow10(scale);
+  const whole = units / divisor;
+  const fraction = String(units % divisor).padStart(scale, '0');
+  return scale === 0 ? String(whole) : `${whole}.${fraction}`;
+};
+
+const unitsToNumber = (units, scale) => Number(formatUnits(units || 0n, scale));
+
+const roundDecimal = (value, scale) => {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return 0;
+  const sign = number < 0 ? -1 : 1;
+  const fixed = Math.abs(number).toFixed(scale + 6);
+  const units = parseDecimalUnits(fixed, scale);
+  return sign * unitsToNumber(units, scale);
+};
+
+const roundMoney = (value) => roundDecimal(value, VALUE_SCALE);
+
+const roundQuantity = (value) => roundDecimal(value, QTY_SCALE);
 
 const toNumber = (value) => {
   const number = Number(value || 0);
   return Number.isFinite(number) ? number : 0;
+};
+
+const normalizeCalculationMode = (mode) => (
+  mode === CALCULATION_MODES.QTY || mode === CALCULATION_MODES.VALUE ? mode : ''
+);
+
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+
+const explicitValueSource = (product = {}) => {
+  if (hasOwn(product, 'value')) return product.value;
+  if (hasOwn(product, 'calculatedValue')) return product.calculatedValue;
+  if (hasOwn(product, 'totalValue')) return product.totalValue;
+  return undefined;
+};
+
+const validateProvidedNumericFields = (product = {}, fieldPrefix = 'Product row') => {
+  [
+    ['mrp', 'MRP', MRP_SCALE],
+    ['mrpSnapshot', 'MRP snapshot', MRP_SCALE],
+    ['masterMrpSnapshot', 'Master MRP snapshot', MRP_SCALE],
+    ['quantity', 'Qty', QTY_SCALE],
+    ['value', 'Value', VALUE_SCALE],
+    ['calculatedValue', 'Calculated value', VALUE_SCALE],
+    ['totalValue', 'Total value', VALUE_SCALE],
+  ].forEach(([key, label, scale]) => {
+    if (hasOwn(product, key) && product[key] !== undefined && product[key] !== '') {
+      parseDecimalUnits(product[key], scale, `${fieldPrefix} ${label}`);
+    }
+  });
+};
+
+const parseProductRowsInput = (rows = []) => {
+  if (typeof rows === 'string' && rows.trim()) {
+    try {
+      return JSON.parse(rows);
+    } catch (error) {
+      throw ApiError.badRequest('Invalid product rows payload.');
+    }
+  }
+  return Array.isArray(rows) ? rows : [];
+};
+
+const validateProductRowsNumericPayload = (rows = [], options = {}) => {
+  parseProductRowsInput(rows).forEach((product, index) => {
+    const fieldPrefix = options.label ? `${options.label} ${index + 1}:` : `Product row ${index + 1}:`;
+    validateProvidedNumericFields(product, fieldPrefix);
+  });
+};
+
+const calculateValueFromQtyUnits = (mrpUnits, quantityUnits) => (
+  roundScale(mrpUnits * quantityUnits, MRP_SCALE + QTY_SCALE, VALUE_SCALE)
+);
+
+const calculateQtyFromValueUnits = (valueUnits, mrpUnits) => {
+  if (mrpUnits <= 0n) return 0n;
+  return roundDivide(valueUnits * pow10(MRP_SCALE + QTY_SCALE - VALUE_SCALE), mrpUnits);
 };
 
 const cleanString = (value) => String(value || '').trim();
@@ -26,18 +146,58 @@ const productIdentity = (product = {}) => {
 
 const productNameKey = (product = {}) => cleanString(product.productName || product.name).toLowerCase();
 
-const calculateProductValue = (product = {}) => {
-  const mrp = toNumber(product.mrp);
-  const quantity = toNumber(product.quantity);
-  const calculated = roundMoney(mrp * quantity);
-  const explicit = toNumber(product.value ?? product.calculatedValue ?? product.totalValue);
-  return explicit > 0 ? roundMoney(explicit) : calculated;
+const calculateProductValue = (product = {}, options = {}) => {
+  const mrpUnits = parseDecimalUnits(product.mrp, MRP_SCALE, 'MRP');
+  const quantityUnits = parseDecimalUnits(product.quantity, QTY_SCALE, 'Qty');
+  const mode = options.useCalculationMode ? normalizeCalculationMode(product.calculationMode) : '';
+
+  if (mode === CALCULATION_MODES.VALUE) {
+    const source = explicitValueSource(product);
+    const valueUnits = parseDecimalUnits(source, VALUE_SCALE, 'Value');
+    return unitsToNumber(valueUnits, VALUE_SCALE);
+  }
+
+  const calculatedUnits = calculateValueFromQtyUnits(mrpUnits, quantityUnits);
+  if (mode === CALCULATION_MODES.QTY) return unitsToNumber(calculatedUnits, VALUE_SCALE);
+
+  const source = explicitValueSource(product);
+  if (source !== undefined && source !== null && source !== '') {
+    const explicitUnits = parseDecimalUnits(source, VALUE_SCALE, 'Value');
+    if (explicitUnits > 0n) return unitsToNumber(explicitUnits, VALUE_SCALE);
+  }
+
+  return unitsToNumber(calculatedUnits, VALUE_SCALE);
 };
 
-const normalizeProductRow = (product = {}) => {
-  const mrp = toNumber(product.mrp);
-  const quantity = toNumber(product.quantity);
-  const value = calculateProductValue({ ...product, mrp, quantity });
+const normalizeProductRow = (product = {}, options = {}, index = 0) => {
+  const fieldPrefix = options.label ? `${options.label} ${index + 1}:` : `Product row ${index + 1}:`;
+  if (options.strictNumeric) validateProvidedNumericFields(product, fieldPrefix);
+
+  const mrpUnits = parseDecimalUnits(product.mrp, MRP_SCALE, `${fieldPrefix} MRP`);
+  let quantityUnits = parseDecimalUnits(product.quantity, QTY_SCALE, `${fieldPrefix} Qty`);
+  let valueUnits;
+  const calculationMode = normalizeCalculationMode(product.calculationMode);
+  const mode = options.useCalculationMode ? calculationMode : '';
+
+  if (mode === CALCULATION_MODES.VALUE) {
+    valueUnits = parseDecimalUnits(explicitValueSource(product), VALUE_SCALE, `${fieldPrefix} Value`);
+    quantityUnits = calculateQtyFromValueUnits(valueUnits, mrpUnits);
+  } else if (mode === CALCULATION_MODES.QTY) {
+    valueUnits = calculateValueFromQtyUnits(mrpUnits, quantityUnits);
+  } else {
+    const calculatedUnits = calculateValueFromQtyUnits(mrpUnits, quantityUnits);
+    const source = explicitValueSource(product);
+    if (source !== undefined && source !== null && source !== '') {
+      const explicitUnits = parseDecimalUnits(source, VALUE_SCALE, `${fieldPrefix} Value`);
+      valueUnits = explicitUnits > 0n ? explicitUnits : calculatedUnits;
+    } else {
+      valueUnits = calculatedUnits;
+    }
+  }
+
+  const mrp = unitsToNumber(mrpUnits, MRP_SCALE);
+  const quantity = unitsToNumber(quantityUnits, QTY_SCALE);
+  const value = unitsToNumber(valueUnits, VALUE_SCALE);
 
   return {
     productId: product.productId || null,
@@ -46,29 +206,30 @@ const normalizeProductRow = (product = {}) => {
     sku: cleanString(product.sku),
     productCode: cleanString(product.productCode || product.code),
     mrp,
-    mrpSnapshot: toNumber(product.mrpSnapshot || mrp),
-    masterMrpSnapshot: toNumber(product.masterMrpSnapshot),
+    mrpSnapshot: unitsToNumber(parseDecimalUnits(product.mrpSnapshot || mrp, MRP_SCALE, `${fieldPrefix} MRP snapshot`), MRP_SCALE),
+    masterMrpSnapshot: unitsToNumber(parseDecimalUnits(product.masterMrpSnapshot || 0, MRP_SCALE, `${fieldPrefix} Master MRP snapshot`), MRP_SCALE),
     quantity,
     unit: cleanString(product.unit) || 'pcs',
     value,
     calculatedValue: value,
+    calculationMode: calculationMode || undefined,
     batchNo: cleanString(product.batchNo),
     expiryDate: product.expiryDate || null,
     remarks: cleanString(product.remarks),
   };
 };
 
-const normalizeProductRows = (rows = []) => {
-  if (typeof rows === 'string' && rows.trim()) rows = JSON.parse(rows);
+const normalizeProductRows = (rows = [], options = {}) => {
+  rows = parseProductRowsInput(rows);
   if (!Array.isArray(rows)) return [];
 
   return rows
-    .map(normalizeProductRow)
+    .map((product, index) => normalizeProductRow(product, options, index))
     .filter((product) => product.productName || product.mrp || product.quantity || product.value);
 };
 
 const sumProducts = (products = []) => products.reduce((totals, product) => {
-  totals.quantity += toNumber(product.quantity);
+  totals.quantity = roundQuantity(totals.quantity + toNumber(product.quantity));
   totals.value = roundMoney(totals.value + toNumber(product.value || product.calculatedValue));
   return totals;
 }, { quantity: 0, value: 0 });
@@ -79,7 +240,7 @@ const sentProductSnapshot = (product = {}) => ({
   sentProductNameSnapshot: product.productNameSnapshot || product.productName || '',
   sentMRP: toNumber(product.mrp),
   sentMRPSnapshot: toNumber(product.mrpSnapshot || product.mrp),
-  sentQuantity: toNumber(product.quantity),
+  sentQuantity: roundQuantity(product.quantity),
   sentValue: roundMoney(product.value || product.calculatedValue),
 });
 
@@ -115,10 +276,10 @@ const statusForMapping = ({ approved, sentItems, quantityDifference, valueDiffer
 
 const buildMapping = (approved, sentItems, remark = '') => {
   const sentTotals = sumProducts(sentItems);
-  const approvedQuantity = toNumber(approved?.quantity);
+  const approvedQuantity = roundQuantity(approved?.quantity);
   const approvedValue = roundMoney(approved?.value || approved?.calculatedValue);
   const sentValue = roundMoney(sentTotals.value);
-  const quantityDifference = roundMoney(sentTotals.quantity - approvedQuantity);
+  const quantityDifference = roundQuantity(sentTotals.quantity - approvedQuantity);
   const valueDifference = roundMoney(sentValue - approvedValue);
   const firstSent = sentItems[0] || {};
   const isSingleSent = sentItems.length === 1;
@@ -141,7 +302,7 @@ const buildMapping = (approved, sentItems, remark = '') => {
       : sentItems.map((product) => product.productNameSnapshot || product.productName).filter(Boolean).join(', '),
     sentMRP: isSingleSent ? toNumber(firstSent.mrp) : 0,
     sentMRPSnapshot: isSingleSent ? toNumber(firstSent.mrpSnapshot || firstSent.mrp) : 0,
-    sentQuantity: roundMoney(sentTotals.quantity),
+    sentQuantity: roundQuantity(sentTotals.quantity),
     sentValue,
     sentItems: sentItems.map(sentProductSnapshot),
     quantityDifference,
@@ -240,10 +401,10 @@ const buildAmountApprovalMapping = (approvedValue, sentProducts) => {
       : sentProducts.map((product) => product.productNameSnapshot || product.productName).filter(Boolean).join(', '),
     sentMRP: sentProducts.length === 1 ? toNumber(sentProducts[0].mrp) : 0,
     sentMRPSnapshot: sentProducts.length === 1 ? toNumber(sentProducts[0].mrpSnapshot || sentProducts[0].mrp) : 0,
-    sentQuantity: roundMoney(sentTotals.quantity),
+    sentQuantity: roundQuantity(sentTotals.quantity),
     sentValue: roundMoney(sentTotals.value),
     sentItems: sentProducts.map(sentProductSnapshot),
-    quantityDifference: roundMoney(sentTotals.quantity),
+    quantityDifference: roundQuantity(sentTotals.quantity),
     valueDifference,
     mappingStatus,
     remark: '',
@@ -264,7 +425,7 @@ const calculateOverallStatus = ({
   if (!sentProducts.length) return 'PENDING';
 
   const valueDifference = roundMoney(totalSentValue - totalApprovedValue);
-  const quantityDifference = roundMoney(totalSentQuantity - totalApprovedQuantity);
+  const quantityDifference = roundQuantity(totalSentQuantity - totalApprovedQuantity);
   const statuses = productMappings.map((mapping) => mapping.mappingStatus);
 
   if (
@@ -293,7 +454,11 @@ const buildMatchDetails = (productMappings = []) => productMappings.map((mapping
 const calculateSettlement = (settlementLike = {}) => {
   const approvalType = settlementLike.approvalType || 'Amount';
   const approvedProducts = normalizeProductRows(settlementLike.approvedProducts || []);
-  const sentProducts = normalizeProductRows(settlementLike.sentProducts || []);
+  const sentProducts = normalizeProductRows(settlementLike.sentProducts || [], {
+    label: 'Sent product row',
+    strictNumeric: true,
+    useCalculationMode: true,
+  });
   const productApprovedValue = sumProducts(approvedProducts).value;
   const approvedAmount = roundMoney(settlementLike.approvedAmount || settlementLike.approvedValue || 0);
   const totalApprovedValue = approvalType === 'Product'
@@ -307,9 +472,9 @@ const calculateSettlement = (settlementLike = {}) => {
     ? allocateSentProducts(approvedProducts, sentProducts)
     : buildAmountApprovalMapping(totalApprovedValue, sentProducts);
   const totalValueDifference = roundMoney(sentTotals.value - totalApprovedValue);
-  const totalApprovedQuantity = roundMoney(approvedTotals.quantity);
-  const totalSentQuantity = roundMoney(sentTotals.quantity);
-  const totalQuantityDifference = roundMoney(totalSentQuantity - totalApprovedQuantity);
+  const totalApprovedQuantity = roundQuantity(approvedTotals.quantity);
+  const totalSentQuantity = roundQuantity(sentTotals.quantity);
+  const totalQuantityDifference = roundQuantity(totalSentQuantity - totalApprovedQuantity);
   const settlementStatus = calculateOverallStatus({
     currentStatus: settlementLike.settlementStatus,
     isLocked: settlementLike.isLocked,
@@ -340,9 +505,12 @@ const calculateSettlement = (settlementLike = {}) => {
 };
 
 module.exports = {
+  CALCULATION_MODES,
   MAPPING_STATUSES,
   calculateProductValue,
   calculateSettlement,
   normalizeProductRows,
   roundMoney,
+  roundQuantity,
+  validateProductRowsNumericPayload,
 };

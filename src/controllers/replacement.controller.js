@@ -10,6 +10,11 @@ const { pagination: paginationConfig } = require('../configs/app.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
 const { validateActiveProductSelections } = require('../utils/productSelection');
+const {
+  normalizeProductRows: normalizeSettlementProductRows,
+  roundMoney,
+  validateProductRowsNumericPayload,
+} = require('../services/settlementCalculation.service');
 
 // Generate replacement ID: REP-20260802-00001
 const generateReplacementId = async () => {
@@ -18,6 +23,12 @@ const generateReplacementId = async () => {
   const seq = await Counter.getNextSequence(`rep_${dateStr}`);
   return `REP-${dateStr}-${String(seq).padStart(5, '0')}`;
 };
+
+const approvalCalculationMode = (mode) => (mode === 'VALUE' ? 'VALUE' : 'QTY');
+
+const approvalProductValueSource = (product = {}) => (
+  product.value ?? product.calculatedValue ?? product.totalValue ?? ''
+);
 
 // GET /api/replacements
 const getReplacements = async (req, res, next) => {
@@ -379,38 +390,60 @@ const updateApproval = async (req, res, next) => {
       replacement.totalProductApprovalValue = 0;
     } else {
       if (!Array.isArray(approvalProducts)) approvalProducts = [];
+      validateProductRowsNumericPayload(approvalProducts, { label: 'Approved product row' });
       const selectedProducts = await validateActiveProductSelections({
         rows: approvalProducts,
         user: req.user,
         companyId: replacement.company,
         label: 'Approved product',
       });
-      const normalizedProducts = selectedProducts
-        .map((product) => ({
-          productId: product.productId,
-          productName: String(product.productNameSnapshot || product.productName || '').trim(),
-          productNameSnapshot: String(product.productNameSnapshot || product.productName || '').trim(),
-          sku: product.sku || '',
-          productCode: product.productCode || product.code || '',
-          mrp: Number(product.mrp || 0),
-          mrpSnapshot: Number(product.mrpSnapshot || product.mrp || 0),
-          masterMrpSnapshot: Number(product.masterMrpSnapshot || 0),
-          quantity: Number(product.quantity || 0),
-          totalValue: Number(product.totalValue || product.value || product.calculatedValue || 0),
-          status: ['Approved', 'Rejected', 'Pending'].includes(product.status) ? product.status : 'Approved',
-        }))
+      const calculatedProducts = normalizeSettlementProductRows(
+        selectedProducts.map((product) => ({
+          ...product,
+          value: approvalProductValueSource(product),
+          calculatedValue: approvalProductValueSource(product),
+          totalValue: approvalProductValueSource(product),
+          calculationMode: approvalCalculationMode(product.calculationMode),
+        })),
+        {
+          label: 'Approved product row',
+          strictNumeric: true,
+          useCalculationMode: true,
+        }
+      );
+      const normalizedProducts = calculatedProducts
+        .map((product, index) => {
+          const selectedProduct = selectedProducts[index] || {};
+          const value = roundMoney(product.value || product.calculatedValue || 0);
+          return {
+            productId: product.productId,
+            productName: String(product.productNameSnapshot || product.productName || '').trim(),
+            productNameSnapshot: String(product.productNameSnapshot || product.productName || '').trim(),
+            sku: product.sku || '',
+            productCode: product.productCode || product.code || '',
+            mrp: product.mrp,
+            mrpSnapshot: product.mrpSnapshot || product.mrp || 0,
+            masterMrpSnapshot: product.masterMrpSnapshot || 0,
+            quantity: product.quantity,
+            value,
+            calculatedValue: value,
+            totalValue: value,
+            calculationMode: approvalCalculationMode(product.calculationMode),
+            status: ['Approved', 'Rejected', 'Pending'].includes(selectedProduct.status) ? selectedProduct.status : 'Approved',
+          };
+        })
         .filter((product) => product.productId || product.mrp || product.quantity);
       if (normalizedProducts.length === 0) throw ApiError.badRequest('At least one product approval row is required.');
       normalizedProducts.forEach((product) => {
         if (!product.productId) throw ApiError.badRequest('Product selection is required.');
         if (Number.isNaN(product.mrp) || product.mrp < 0) throw ApiError.badRequest('MRP must be numeric and non-negative.');
         if (Number.isNaN(product.quantity) || product.quantity < 0) throw ApiError.badRequest('Quantity must be numeric and non-negative.');
-        if (!product.totalValue) product.totalValue = product.mrp * product.quantity;
         if (product.totalValue <= 0) throw ApiError.badRequest('Approved product value must be greater than zero.');
       });
-      replacement.approvalAmount = Number(approvalAmount || normalizedProducts.reduce((sum, product) => sum + product.totalValue, 0));
+      const productApprovalTotal = roundMoney(normalizedProducts.reduce((sum, product) => sum + product.totalValue, 0));
+      replacement.approvalAmount = productApprovalTotal;
       replacement.approvalProducts = normalizedProducts;
-      replacement.totalProductApprovalValue = normalizedProducts.reduce((sum, product) => sum + product.totalValue, 0);
+      replacement.totalProductApprovalValue = productApprovalTotal;
     }
 
     if (approvedCases !== undefined) replacement.approvedCases = approvedCases;

@@ -8,7 +8,11 @@ const { pagination: paginationConfig } = require('../configs/app.config');
 const { isReplicaSet } = require('../configs/db.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const { createAuditLog, getClientInfo } = require('../middlewares/audit.middleware');
-const { calculateSettlement, normalizeProductRows: normalizeSettlementProductRows } = require('../services/settlementCalculation.service');
+const {
+  calculateSettlement,
+  normalizeProductRows: normalizeSettlementProductRows,
+  validateProductRowsNumericPayload,
+} = require('../services/settlementCalculation.service');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
 const { validateActiveProductSelections } = require('../utils/productSelection');
 const {
@@ -47,13 +51,18 @@ const populateSettlementList = (query) => query
   .select('settlementNo replacementId partyId companyId approvalType approvedValue sentValue difference settlementStatus approvedProducts companyRLNo cnNo lastSaleInvoiceNo isLocked createdAt');
 
 const normalizeProductRows = async (rows = [], req, companyId) => {
+  validateProductRowsNumericPayload(rows, { label: 'Sent product row' });
   const selectedRows = await validateActiveProductSelections({
     rows,
     user: req.user,
     companyId,
     label: 'Sent product',
   });
-  return normalizeSettlementProductRows(selectedRows);
+  return normalizeSettlementProductRows(selectedRows, {
+    label: 'Sent product row',
+    strictNumeric: true,
+    useCalculationMode: true,
+  });
 };
 
 const isSuperAdmin = (req) => req.user?.role === 'super_admin';
