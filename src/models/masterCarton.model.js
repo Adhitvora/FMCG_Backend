@@ -35,6 +35,17 @@ const masterCartonSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // A saved carton merge always represents exactly one physical carton.
+    physicalCaseCount: {
+      type: Number,
+      default: 1,
+      required: true,
+      enum: [1],
+      validate: {
+        validator: Number.isSafeInteger,
+        message: 'Physical carton count must be a positive whole number.',
+      },
+    },
     company: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Company',
@@ -58,6 +69,7 @@ const masterCartonSchema = new mongoose.Schema(
 
 masterCartonSchema.index({ company: 1 });
 masterCartonSchema.index({ status: 1 });
+masterCartonSchema.index({ 'entries.replacementId': 1 });
 
 // Auto-calculate totalCases before save
 masterCartonSchema.pre('save', function (next) {

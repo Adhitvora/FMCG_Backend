@@ -4,6 +4,10 @@
   "description": "HET ARYA ENTERPRISE - FMCG Replacement ERP Backend",
   "main": "src/server.js",
   "scripts": {
+    "postinstall": "npm run browser:install",
+    "browser:install": "puppeteer browsers install chrome",
+    "browser:check": "node scripts/check-pdf-browser.js",
+    "build": "npm run browser:install && npm run browser:check",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed": "node src/seeds/superadmin.seed.js"

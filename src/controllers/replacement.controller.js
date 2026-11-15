@@ -10,6 +10,7 @@ const { pagination: paginationConfig } = require('../configs/app.config');
 const { applyCompanyScope, assertCompanyAccess } = require('../utils/companyAccess');
 const { ensureSettlementForReplacement } = require('../services/settlementLifecycle.service');
 const { validateActiveProductSelections } = require('../utils/productSelection');
+const { unmergedConditions } = require('../services/cartonMerge.service');
 const {
   normalizeProductRows: normalizeSettlementProductRows,
   roundMoney,
@@ -52,6 +53,11 @@ const getReplacements = async (req, res, next) => {
     if (req.query.invoiceStatus === 'generated') filter.invoiceId = { $ne: null };
     if (req.query.dispatchStatus === 'pending') filter.sentDate = null;
     if (req.query.dispatchStatus === 'dispatched') filter.sentDate = { $ne: null };
+    if (req.query.mergeEligible === 'true') {
+      const { $or, ...available } = unmergedConditions();
+      Object.assign(filter, available, { receivingCases: { $gte: 1 } });
+      filter.$and = [{ $or }];
+    }
     if (req.query.search) {
       filter.$or = [
         { replacementId: { $regex: req.query.search, $options: 'i' } },
@@ -295,7 +301,23 @@ const updateReplacement = async (req, res, next) => {
       if (req.body[f] !== undefined) replacement[f] = req.body[f];
     });
 
-    await replacement.save();
+    const cartonDataChanged = ['company', 'party', 'receivingCases'].some((field) => replacement.isModified(field));
+    if (cartonDataChanged) {
+      if (oldValue.cartonId || oldValue.masterCartonId || oldValue.cartonMergedAt || oldValue.cartonMergedBy || oldValue.invoiceId || oldValue.cartonStatus === 'MERGED' || oldValue.cartonStatus === 'DISPATCHED') {
+        throw ApiError.conflict('Company, party and received case quantity cannot change after cartons are merged or invoiced.');
+      }
+      // Mongoose includes $where in the save filter, closing the race with a
+      // merge or invoice created after this edit originally read the row.
+      replacement.$where = unmergedConditions();
+    }
+    try {
+      await replacement.save();
+    } catch (error) {
+      if (cartonDataChanged && error.name === 'DocumentNotFoundError') {
+        throw ApiError.conflict('This replacement was merged or invoiced while being edited. Refresh the replacement.');
+      }
+      throw error;
+    }
 
     const clientInfo = getClientInfo(req);
     await createAuditLog({

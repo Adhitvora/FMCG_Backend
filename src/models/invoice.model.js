@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { buildInvoiceData } = require('../services/invoiceData.service');
 
 const invoiceItemSchema = new mongoose.Schema({
   replacement: {
@@ -29,7 +30,7 @@ const invoiceItemSchema = new mongoose.Schema({
   actualCases: {
     type: Number,
     min: 0,
-    default: 0,
+    default: undefined,
   },
   cartonLabel: {
     type: String,
@@ -52,7 +53,7 @@ const invoiceItemSchema = new mongoose.Schema({
     type: Number,
   },
   receivingDate: Date,
-  receivingCases: { type: Number, default: 0 },
+  receivingCases: { type: Number, default: undefined },
   sentDate: Date,
   dispatchCases: { type: Number, default: 0 },
   approvalStatus: { type: String, default: 'Pending' },
@@ -72,6 +73,8 @@ const cartonSchema = new mongoose.Schema({
   label: { type: String, required: true },
   masterCartonId: { type: mongoose.Schema.Types.ObjectId, ref: 'MasterCarton', default: null },
   totalCases: { type: Number, default: 0 },
+  memberReplacementIds: { type: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Replacement' }], default: undefined },
+  physicalCaseCount: { type: Number, min: 1, default: undefined, validate: Number.isSafeInteger },
 }, { _id: false });
 
 const invoiceSchema = new mongoose.Schema(
@@ -121,12 +124,6 @@ const invoiceSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    packingMode: {
-      type: String,
-      enum: ['individual', 'merge'],
-      default: 'merge',
-    },
-
     // ─── Cartons (auto-created) ───
     cartons: [cartonSchema],
 
@@ -148,6 +145,7 @@ const invoiceSchema = new mongoose.Schema(
   }],
   totalProductApprovalValue: { type: Number, default: 0 },
     totalActualCases: { type: Number, default: 0 },
+    totalCase2: { type: Number, default: 0 },
 
     // ─── PDF ───
     pdfPath: {
@@ -158,6 +156,7 @@ const invoiceSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    pdfVersion: { type: Number, default: 0 },
 
     // ─── Lock ───
     isLocked: {
@@ -223,18 +222,19 @@ invoiceSchema.index({ 'items.replacement': 1 });
 
 // Calculate totals before save
 invoiceSchema.pre('save', function (next) {
+  try {
+    if (this.isNew || this.isModified('items') || this.isModified('cartons')) {
+      const data = buildInvoiceData(this);
+      this.totalActualCases = data.totalCase1;
+      this.totalCase2 = data.totalCase2;
+    }
   this.totalCasesReceived = this.items.reduce((sum, i) => sum + (i.receivingCases || 0), 0);
-  this.totalActualCases = this.items.reduce((sum, i) => {
-    const cases = i.actualCases !== undefined && i.actualCases !== null
-      ? i.actualCases
-      : i.receivingCases;
-    return sum + (cases || 0);
-  }, 0);
   this.totalCasesSent = this.items.reduce((sum, i) => sum + (i.dispatchCases || 0), 0);
   this.totalApprovedCases = this.items.reduce((sum, i) => sum + (i.approvedCases || 0), 0);
   this.totalRejectedCases = this.items.reduce((sum, i) => sum + (i.rejectedCases || 0), 0);
   this.totalApprovalAmount = this.items.reduce((sum, i) => sum + (i.approvalAmount || 0), 0);
   next();
+  } catch (error) { next(error); }
 });
 
 module.exports = mongoose.model('Invoice', invoiceSchema);

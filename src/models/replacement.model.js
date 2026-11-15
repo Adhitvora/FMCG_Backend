@@ -312,10 +312,9 @@ replacementSchema.pre('validate', function (next) {
 
   if (this.cartonId && this.cartonStatus === 'AVAILABLE') this.cartonStatus = 'MERGED';
   if (!this.cartonId && this.cartonStatus !== 'DISPATCHED') {
-    this.cartonStatus = 'AVAILABLE';
-    this.cartonGroupNumber = null;
-    this.cartonMergedAt = null;
-    this.cartonMergedBy = null;
+    // Merge history is permanent, including records with a missing legacy link.
+    this.cartonStatus = this.cartonMergedAt || this.cartonMergedBy ? 'MERGED' : 'AVAILABLE';
+    if (this.cartonStatus === 'AVAILABLE') this.cartonGroupNumber = null;
   }
 
   if (Array.isArray(this.approvalProducts)) {

@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const puppeteer = require('puppeteer');
 const { buildInvoiceHtml } = require('./invoiceTemplate.service');
+const ApiError = require('../utils/apiError');
 const { uploadFileToCloudinary, isCloudinaryConfigured, CLOUDINARY_ROOT } = require('../configs/cloudinary.config');
 
 const uploadsDirectory = path.resolve(__dirname, '..', '..', 'uploads');
@@ -107,27 +108,39 @@ const createTempPdfPath = (invoiceNumber) => {
   return path.join(tempDirectory, fileName + '.' + process.pid + '.' + Date.now() + '.tmp.pdf');
 };
 
-const renderInvoicePdf = async (invoice, outputPath) => {
+const withInvoicePage = async (invoice, render) => {
   const browser = await getBrowser();
   const page = await browser.newPage();
 
   try {
     await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 });
-    await page.setContent(buildInvoiceHtml(invoice), { waitUntil: 'load' });
     await page.emulateMediaType('print');
-    await page.evaluate(() => document.fonts.ready);
-    await page.pdf({
+    await page.setContent(buildInvoiceHtml(invoice), { waitUntil: 'load' });
+    const pagination = await page.evaluate(() => window.invoicePaginationReady);
+    if (!pagination || pagination.error) {
+      throw ApiError.badRequest(pagination?.error || 'Invoice pagination did not complete.');
+    }
+    return await render(page);
+  } finally {
+    await page.close();
+  }
+};
+
+// Return an already paginated preview. Inline scripts in srcDoc inherit the
+// hosting app's CSP, so browser execution cannot be required by the API preview.
+const renderInvoiceHtml = (invoice) => withInvoicePage(invoice, async (page) => {
+  await page.evaluate(() => document.querySelectorAll('script').forEach((script) => script.remove()));
+  return page.content();
+});
+
+const renderInvoicePdf = (invoice, outputPath) => withInvoicePage(invoice, (page) => page.pdf({
       path: outputPath,
       format: 'A4',
       printBackground: true,
       preferCSSPageSize: true,
       displayHeaderFooter: false,
-      margin: { top: 0, right: 0, bottom: 0, left: 0 },
-    });
-  } finally {
-    await page.close();
-  }
-};
+      margin: { top: '5mm', right: '6mm', bottom: '4mm', left: '6mm' },
+    }));
 
 /**
  * Upload a generated invoice PDF to Cloudinary.
@@ -180,6 +193,7 @@ module.exports = {
   fileExists,
   getInvoicePdfInfo,
   removeFileIfExists,
+  renderInvoiceHtml,
   renderInvoicePdf,
   uploadInvoicePdfToCloudinary,
 };
