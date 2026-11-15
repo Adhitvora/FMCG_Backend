@@ -165,6 +165,21 @@ test('legacy one-member assigned carton remains individual when creating another
   assert.equal(invoice.totalCase2, 5);
 });
 
+test('an individual replacement and a complete merged carton can share one invoice', async () => {
+  const { create } = harness({
+    rows: [replacement(0, 2), replacement(1, 3, ids[7]), replacement(2, 4, ids[7])],
+    cartons: [{
+      _id: ids[7], company: ids[8], physicalCaseCount: 1,
+      entries: [{ replacementId: ids[1], cases: 3 }, { replacementId: ids[2], cases: 4 }],
+    }],
+  });
+  const { invoice, error } = await create();
+  assert.equal(error, undefined);
+  assert.equal(invoice.items.length, 3);
+  assert.equal(invoice.totalActualCases, 9);
+  assert.equal(invoice.totalCase2, 3);
+});
+
 test('incomplete saved merge is rejected before rendering or updating any rows', async () => {
   const { state, create } = harness({ rows: [replacement(0, 2, ids[7])], cartons: [{ _id: ids[7], company: ids[8], entries: [{ replacementId: ids[0], cases: 2 }, { replacementId: ids[1], cases: 5 }] }] });
   const { error } = await create();
