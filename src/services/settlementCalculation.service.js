@@ -99,11 +99,14 @@ const validateProvidedNumericFields = (product = {}, fieldPrefix = 'Product row'
     ['mrp', 'MRP', MRP_SCALE],
     ['mrpSnapshot', 'MRP snapshot', MRP_SCALE],
     ['masterMrpSnapshot', 'Master MRP snapshot', MRP_SCALE],
+    ['perPieceWeightGram', 'Per piece weight (Gram)', QTY_SCALE],
+    ['masterPerPieceWeightGramSnapshot', 'Master per piece weight (Gram) snapshot', QTY_SCALE],
     ['quantity', 'Qty', QTY_SCALE],
     ['value', 'Value', VALUE_SCALE],
     ['calculatedValue', 'Calculated value', VALUE_SCALE],
     ['totalValue', 'Total value', VALUE_SCALE],
   ].forEach(([key, label, scale]) => {
+    if (['perPieceWeightGram', 'masterPerPieceWeightGramSnapshot'].includes(key) && product[key] === null) return;
     if (hasOwn(product, key) && product[key] !== undefined && product[key] !== '') {
       parseDecimalUnits(product[key], scale, `${fieldPrefix} ${label}`);
     }
@@ -208,6 +211,12 @@ const normalizeProductRow = (product = {}, options = {}, index = 0) => {
     mrp,
     mrpSnapshot: unitsToNumber(parseDecimalUnits(product.mrpSnapshot || mrp, MRP_SCALE, `${fieldPrefix} MRP snapshot`), MRP_SCALE),
     masterMrpSnapshot: unitsToNumber(parseDecimalUnits(product.masterMrpSnapshot || 0, MRP_SCALE, `${fieldPrefix} Master MRP snapshot`), MRP_SCALE),
+    perPieceWeightGram: product.perPieceWeightGram === undefined || product.perPieceWeightGram === '' || product.perPieceWeightGram === null
+      ? null
+      : unitsToNumber(parseDecimalUnits(product.perPieceWeightGram, QTY_SCALE, `${fieldPrefix} Per piece weight (Gram)`), QTY_SCALE),
+    masterPerPieceWeightGramSnapshot: product.masterPerPieceWeightGramSnapshot === undefined || product.masterPerPieceWeightGramSnapshot === '' || product.masterPerPieceWeightGramSnapshot === null
+      ? null
+      : unitsToNumber(parseDecimalUnits(product.masterPerPieceWeightGramSnapshot, QTY_SCALE, `${fieldPrefix} Master per piece weight (Gram) snapshot`), QTY_SCALE),
     quantity,
     unit: cleanString(product.unit) || 'pcs',
     value,

@@ -32,6 +32,11 @@ const productSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
+    perPieceWeightGram: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
     companyId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Company',

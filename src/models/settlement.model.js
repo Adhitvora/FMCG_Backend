@@ -10,6 +10,9 @@ const productEntrySchema = new mongoose.Schema({
   mrp: { type: Number, min: 0, default: 0 },
   mrpSnapshot: { type: Number, min: 0, default: 0 },
   masterMrpSnapshot: { type: Number, min: 0, default: 0 },
+  // Stored on the settlement row so product-master changes never rewrite history.
+  perPieceWeightGram: { type: Number, min: 0, default: null },
+  masterPerPieceWeightGramSnapshot: { type: Number, min: 0, default: null },
   quantity: { type: Number, min: 0, default: 0 },
   unit: { type: String, trim: true, default: 'pcs' },
   value: { type: Number, min: 0, default: 0 },

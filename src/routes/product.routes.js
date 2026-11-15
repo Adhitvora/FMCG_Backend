@@ -7,6 +7,7 @@ const {
   deleteProduct,
   searchProducts,
   downloadSampleExcel,
+  exportProducts,
   previewImport,
   importProducts,
 } = require('../controllers/product.controller');
@@ -19,6 +20,7 @@ router.use(auth);
 router.get('/', getProducts);
 router.get('/search', searchProducts);
 router.get('/sample-excel', downloadSampleExcel);
+router.get('/export-excel', exportProducts);
 router.get('/:id', getProduct);
 router.post('/', rbac('super_admin', 'admin', 'operator'), createProduct);
 router.post('/import/preview', rbac('super_admin', 'admin'), upload.single('file'), previewImport);

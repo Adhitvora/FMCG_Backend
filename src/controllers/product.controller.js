@@ -27,6 +27,9 @@ const productImportHeaders = {
   sku: 'sku',
   skucode: 'sku',
   mrp: 'mrp',
+  perpieceweightgram: 'perPieceWeightGram',
+  perpieceweight: 'perPieceWeightGram',
+  pieceweightgram: 'perPieceWeightGram',
   company: 'companyName',
   companyname: 'companyName',
 };
@@ -54,11 +57,32 @@ const parseOptionalMrp = (value) => {
   if (!text) return { value: null, blank: true, valid: true };
 
   const numeric = Number(text.replace(/[\u20b9,\s]/g, ''));
-  if (Number.isNaN(numeric) || numeric < 0) {
+  if (!Number.isFinite(numeric) || numeric < 0) {
     return { value: null, blank: false, valid: false };
   }
 
   return { value: numeric, blank: false, valid: true };
+};
+
+const parseOptionalWeight = (value) => {
+  const text = cleanCellValue(value);
+  if (!text) return { value: null, blank: true, valid: true };
+
+  const numeric = Number(text.replace(/[,_\s]/g, ''));
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    return { value: null, blank: false, valid: false };
+  }
+
+  return { value: numeric, blank: false, valid: true };
+};
+
+const parseOptionalMasterNumber = (value, label, blankValue) => {
+  if (value === undefined || value === '') return blankValue;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw ApiError.badRequest(`${label} must be a valid non-negative number.`);
+  }
+  return numeric;
 };
 
 const getCompanyKey = (companyId) => String(companyId || 'none');
@@ -135,12 +159,13 @@ const parseProductImportRows = (file) => {
         productCode: getCell(row, 'productCode', 1),
         sku: getCell(row, 'sku', 2),
         mrpText: getCell(row, 'mrp', 3),
+        perPieceWeightGramText: getCell(row, 'perPieceWeightGram', 5),
         companyName: getCell(row, 'companyName', 4),
       };
 
       return parsed;
     })
-    .filter((row) => row.name || row.productCode || row.sku || row.mrpText || row.companyName);
+    .filter((row) => row.name || row.productCode || row.sku || row.mrpText || row.perPieceWeightGramText || row.companyName);
 
   if (!rows.length) throw ApiError.badRequest('Excel file is empty.');
 
@@ -248,6 +273,7 @@ const buildProductImportPreview = async (req, rows) => {
   const preview = rows.map((row) => {
     const errors = [];
     const mrp = parseOptionalMrp(row.mrpText);
+    const perPieceWeightGram = parseOptionalWeight(row.perPieceWeightGramText);
     const company = resolveImportCompany({ row, selectedCompanyId, companyMaps, user: req.user });
     const companyKey = getCompanyKey(company.companyId);
     const nameKey = normalizeKey(row.name);
@@ -256,6 +282,7 @@ const buildProductImportPreview = async (req, rows) => {
 
     if (!row.name) errors.push('Product name is required');
     if (!mrp.valid) errors.push('Invalid MRP');
+    if (!perPieceWeightGram.valid) errors.push('Invalid per piece weight (Gram)');
     if (company.error) errors.push(company.error);
 
     if (nameKey) {
@@ -286,6 +313,7 @@ const buildProductImportPreview = async (req, rows) => {
       productCode: row.productCode,
       sku: row.sku,
       mrp: mrp.blank ? null : mrp.value,
+      perPieceWeightGram: perPieceWeightGram.blank ? null : perPieceWeightGram.value,
       companyId: company.companyId,
       companyName: company.companyName,
       status: errors.length ? 'Invalid' : 'Valid',
@@ -328,6 +356,9 @@ const normalizeProduct = (product, source = 'master') => ({
   productCode: product.productCode || product.code || '',
   code: product.code || product.productCode || '',
   mrp: Number(product.mrp || 0),
+  perPieceWeightGram: product.perPieceWeightGram === null || product.perPieceWeightGram === undefined
+    ? null
+    : Number(product.perPieceWeightGram),
   companyId: product.companyId || product.company || null,
   status: product.status || 'active',
   source,
@@ -362,7 +393,7 @@ const getProducts = async (req, res, next) => {
 
     const [products, total] = await Promise.all([
       Product.find(filter)
-        .select('name productName sku productCode code mrp companyId status createdAt')
+        .select('name productName sku productCode code mrp perPieceWeightGram companyId status createdAt')
         .populate('companyId', 'name')
         .sort({ name: 1 })
         .skip(skip)
@@ -391,7 +422,7 @@ const getProduct = async (req, res, next) => {
 // POST /api/products
 const createProduct = async (req, res, next) => {
   try {
-    const { name, productName, sku, productCode, code, mrp, companyId, company, status } = req.body;
+    const { name, productName, sku, productCode, code, mrp, perPieceWeightGram, companyId, company, status } = req.body;
     const finalName = name || productName;
     if (!finalName) throw ApiError.badRequest('Product name is required');
 
@@ -410,7 +441,8 @@ const createProduct = async (req, res, next) => {
       sku: sku || '',
       productCode: productCode || code || '',
       code: code || productCode || '',
-      mrp: mrp !== undefined && mrp !== '' ? Number(mrp) : 0,
+      mrp: parseOptionalMasterNumber(mrp, 'MRP', 0),
+      perPieceWeightGram: parseOptionalMasterNumber(perPieceWeightGram, 'Per Piece Weight (Gram)', null),
       companyId: finalCompanyId,
       company: finalCompanyId,
       status: status === 'inactive' ? 'inactive' : 'active',
@@ -421,7 +453,7 @@ const createProduct = async (req, res, next) => {
       userId: req.user.id, username: req.user.username,
       action: 'CREATE', entity: 'Product', entityId: product._id,
       description: `Created product: ${finalName}`,
-      newValue: { name: finalName, sku, productCode, mrp }, ...clientInfo,
+      newValue: { name: finalName, sku, productCode, mrp, perPieceWeightGram }, ...clientInfo,
     });
 
     ApiResponse.created(res, product, 'Product created successfully');
@@ -437,14 +469,15 @@ const updateProduct = async (req, res, next) => {
     if (!product) throw ApiError.notFound('Product not found');
 
     const oldValue = product.toObject();
-    const { name, productName, sku, productCode, code, mrp, companyId, company, status } = req.body;
+    const { name, productName, sku, productCode, code, mrp, perPieceWeightGram, companyId, company, status } = req.body;
 
     if (name !== undefined) { product.name = name; product.productName = name; }
     if (productName !== undefined) { product.productName = productName; product.name = productName; }
     if (sku !== undefined) product.sku = sku;
     if (productCode !== undefined) { product.productCode = productCode; product.code = productCode; }
     if (code !== undefined) { product.code = code; product.productCode = code; }
-    if (mrp !== undefined) product.mrp = mrp !== '' ? Number(mrp) : 0;
+    if (mrp !== undefined) product.mrp = parseOptionalMasterNumber(mrp, 'MRP', 0);
+    if (perPieceWeightGram !== undefined) product.perPieceWeightGram = parseOptionalMasterNumber(perPieceWeightGram, 'Per Piece Weight (Gram)', null);
     if (companyId !== undefined) { product.companyId = companyId || null; product.company = companyId || null; }
     if (company !== undefined) { product.company = company || null; product.companyId = company || null; }
     if (status !== undefined) product.status = status;
@@ -518,7 +551,7 @@ const searchProducts = async (req, res, next) => {
 
     const [masterProducts, total] = await Promise.all([
       Product.find(productFilter)
-        .select('name productName sku productCode code mrp companyId status')
+        .select('name productName sku productCode code mrp perPieceWeightGram companyId status')
         .sort({ name: 1 })
         .skip(skip)
         .limit(limit)
@@ -551,18 +584,73 @@ const downloadSampleExcel = async (req, res, next) => {
       { header: 'Product Code', key: 'productCode', width: 20 },
       { header: 'SKU', key: 'sku', width: 20 },
       { header: 'MRP', key: 'mrp', width: 12 },
+      { header: 'Per Piece Weight (Gram)', key: 'perPieceWeightGram', width: 27 },
       { header: 'Company', key: 'company', width: 25 },
     ];
 
     sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
     sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0D1B2A' } };
 
-    sheet.addRow({ name: 'CTC-1468', productCode: 'CTC1468', sku: 'CTC-1468-100', mrp: 100, company: 'Company A' });
-    sheet.addRow({ name: 'ATCC-1500', productCode: 'ATCC1500', sku: 'ATCC-1500-150', mrp: 150, company: 'Company A' });
-    sheet.addRow({ name: '250g Kashmiri Chilli Powder', productCode: 'KCP250', sku: '', mrp: '', company: 'Company A' });
+    sheet.addRow({ name: 'CTC-1468', productCode: 'CTC1468', sku: 'CTC-1468-100', mrp: 100, perPieceWeightGram: 100, company: 'Company A' });
+    sheet.addRow({ name: 'ATCC-1500', productCode: 'ATCC1500', sku: 'ATCC-1500-150', mrp: 150, perPieceWeightGram: 150, company: 'Company A' });
+    sheet.addRow({ name: '250g Kashmiri Chilli Powder', productCode: 'KCP250', sku: '', mrp: 50, perPieceWeightGram: 250, company: 'Company A' });
 
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', 'attachment; filename=product_sample.xlsx');
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (error) {
+    next(error);
+  }
+};
+
+// GET /api/products/export-excel
+const exportProducts = async (req, res, next) => {
+  try {
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.companyId) {
+      assertCompanyAccess(req.user, req.query.companyId);
+      filter.companyId = req.query.companyId;
+    } else {
+      applyCompanyScope(filter, req.user, 'companyId');
+    }
+    if (req.query.search) {
+      const regex = new RegExp(escapeRegExp(req.query.search), 'i');
+      filter.$or = [{ name: regex }, { productName: regex }, { sku: regex }, { productCode: regex }, { code: regex }];
+    }
+
+    const products = await Product.find(filter)
+      .select('name productName productCode code sku mrp perPieceWeightGram companyId status')
+      .populate('companyId', 'name')
+      .sort({ name: 1 })
+      .lean();
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Products');
+    sheet.columns = [
+      { header: 'Product Name', key: 'name', width: 35 },
+      { header: 'Product Code', key: 'productCode', width: 20 },
+      { header: 'SKU', key: 'sku', width: 20 },
+      { header: 'MRP', key: 'mrp', width: 12 },
+      { header: 'Per Piece Weight (Gram)', key: 'perPieceWeightGram', width: 27 },
+      { header: 'Company', key: 'company', width: 25 },
+      { header: 'Status', key: 'status', width: 12 },
+    ];
+    sheet.getRow(1).font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 11 };
+    sheet.getRow(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0D1B2A' } };
+    products.forEach((product) => sheet.addRow({
+      name: product.name || product.productName || '',
+      productCode: product.productCode || product.code || '',
+      sku: product.sku || '',
+      mrp: product.mrp || 0,
+      perPieceWeightGram: product.perPieceWeightGram ?? '',
+      company: product.companyId?.name || '',
+      status: product.status || 'active',
+    }));
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=product_export.xlsx');
     await workbook.xlsx.write(res);
     res.end();
   } catch (error) {
@@ -605,6 +693,7 @@ const importProducts = async (req, res, next) => {
       code: row.productCode,
       sku: row.sku,
       mrp: row.mrp === null ? 0 : row.mrp,
+      perPieceWeightGram: row.perPieceWeightGram,
       companyId: row.companyId || null,
       company: row.companyId || null,
       status: 'active',
@@ -654,6 +743,7 @@ module.exports = {
   deleteProduct,
   searchProducts,
   downloadSampleExcel,
+  exportProducts,
   previewImport,
   importProducts,
 };

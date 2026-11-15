@@ -52,7 +52,7 @@ const validateActiveProductSelections = async ({
 
   const ids = [...new Set(incomingRows.map((row) => String(row.productId)))];
   const products = await Product.find({ _id: { $in: ids }, status: 'active' })
-    .select('name productName sku productCode code mrp companyId status')
+    .select('name productName sku productCode code mrp perPieceWeightGram companyId status')
     .lean();
   const productById = new Map(products.map((product) => [String(product._id), product]));
 
@@ -81,6 +81,10 @@ const validateActiveProductSelections = async ({
       mrp,
       mrpSnapshot: mrp,
       masterMrpSnapshot: Number(product.mrp || 0),
+      perPieceWeightGram: row.perPieceWeightGram !== undefined && row.perPieceWeightGram !== ''
+        ? row.perPieceWeightGram
+        : (product.perPieceWeightGram ?? null),
+      masterPerPieceWeightGramSnapshot: product.perPieceWeightGram ?? null,
     };
   });
 };
