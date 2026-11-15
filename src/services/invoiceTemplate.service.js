@@ -97,7 +97,11 @@ const renderHeader = () => {
 };
 
 const renderPartyDetails = (invoice, company) => {
-  const lines = String(company.address).split(/\r?\n|,/).map((line) => line.trim()).filter(Boolean);
+  const lines = String(company.address)
+  .replace(/_/g, '\n')
+  .split(/\r?\n|,/)
+  .map((line) => line.trim())
+  .filter(Boolean);
   const addressLines = lines.length > 1 ? lines.slice(0, -1) : lines;
   const city = lines.length > 1 ? lines[lines.length - 1] : '';
   return `<div class="party-details">
@@ -146,8 +150,13 @@ const renderFooter = (company, data) => {
     </section>
     <div class="company-footer">For, ${escapeHtml(businessName)}</div>
     <table class="signature-section"><colgroup><col><col><col></colgroup><tbody><tr>
+      <td></td><td>A</td><td></td>
+    </tr></tbody></table>
+
+    <table class="signature-section"><colgroup><col><col><col></colgroup><tbody><tr>
       <td>Prepared By :</td><td>Approved By :</td><td>Authorized Sign</td>
     </tr></tbody></table>
+    
   </footer>`;
 };
 
