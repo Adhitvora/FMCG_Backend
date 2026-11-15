@@ -165,7 +165,7 @@ const createInvoice = async (req, res, next) => {
         if (idOf(carton.company) !== idOf(companyDoc._id)) throw ApiError.conflict('Selected cartons belong to another company');
         const selected = new Set(replacementIdList);
         if (carton.entries.some((entry) => !selected.has(idOf(entry.replacementId)))) {
-          throw ApiError.conflict('Select every replacement in a merged carton together. A merged carton cannot be split between invoices.');
+          throw ApiError.conflict('Complete the selected merged carton before invoicing. Individual replacements and other complete merged cartons can be included in this same invoice.');
         }
         for (const entry of carton.entries) {
           const rep = replacements.find((candidate) => idOf(candidate._id) === idOf(entry.replacementId));

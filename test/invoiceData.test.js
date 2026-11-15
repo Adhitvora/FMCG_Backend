@@ -22,6 +22,19 @@ test('the requested mixed example totals 9 received and 4 physical cases', () =>
   assert.equal(data.groups[1].rows.length, 2);
 });
 
+test('a combined invoice preserves the requested 9 Case 1 and 8 Case 2 totals', () => {
+  const invoice = {
+    items: [item('A', 2), item('B', 1, 'MG-001'), item('C', 1, 'MG-001'), item('D', 5)],
+    cartons: [carton('MG-001', ['B', 'C'])],
+  };
+  const data = buildInvoiceData(invoice);
+  assert.equal(data.totalCase1, 9);
+  assert.equal(data.totalCase2, 8);
+  assert.deepEqual(buildInvoiceRows(invoice).map((row) => [row.replacementId, row.case1, row.case2, row.case2Rowspan]), [
+    ['A', 2, 2, 1], ['B', 1, 1, 2], ['C', 1, null, 1], ['D', 5, 5, 1],
+  ]);
+});
+
 test('ten individual rows mirror CASE 1 exactly and never leave CASE 2 blank', () => {
   const quantities = [2, 5, 1, 1, 1, 1, 2, 1, 1, 1];
   const data = buildInvoiceData({ items: quantities.map((quantity, index) => item(String(index), quantity)) });

@@ -180,10 +180,29 @@ test('an individual replacement and a complete merged carton can share one invoi
   assert.equal(invoice.totalCase2, 3);
 });
 
+test('individual replacements and multiple complete merged cartons create one invoice', async () => {
+  const { create } = harness({
+    rows: [
+      replacement(0, 2), replacement(1, 1, ids[7]), replacement(2, 1, ids[7]),
+      replacement(3, 2, ids[6]), replacement(4, 4, ids[6]), replacement(5, 3),
+    ],
+    cartons: [
+      { _id: ids[7], company: ids[8], physicalCaseCount: 1, entries: [{ replacementId: ids[1], cases: 1 }, { replacementId: ids[2], cases: 1 }] },
+      { _id: ids[6], company: ids[8], physicalCaseCount: 1, entries: [{ replacementId: ids[3], cases: 2 }, { replacementId: ids[4], cases: 4 }] },
+    ],
+  });
+  const { invoice, error } = await create();
+  assert.equal(error, undefined);
+  assert.equal(invoice.items.length, 6);
+  assert.equal(invoice.cartons.length, 2);
+  assert.equal(invoice.totalActualCases, 13);
+  assert.equal(invoice.totalCase2, 7);
+});
+
 test('incomplete saved merge is rejected before rendering or updating any rows', async () => {
   const { state, create } = harness({ rows: [replacement(0, 2, ids[7])], cartons: [{ _id: ids[7], company: ids[8], entries: [{ replacementId: ids[0], cases: 2 }, { replacementId: ids[1], cases: 5 }] }] });
   const { error } = await create();
-  assert.match(error.message, /cannot be split/);
+  assert.match(error.message, /Complete the selected merged carton/);
   assert.equal(state.renderCount, 0);
   assert.equal(state.claims.length, 0);
 });

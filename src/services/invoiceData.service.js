@@ -67,7 +67,7 @@ const buildInvoiceData = (invoice) => {
       const actual = new Set(group.rows.map((row) => row.replacementId));
       if (expected.size !== memberIds.length || actual.size !== expected.size
         || [...actual].some((id) => !expected.has(id))) {
-        throw ApiError.conflict('Select every replacement in a merged carton together. This invoice contains an incomplete carton group.');
+        throw ApiError.conflict('Complete the selected merged carton before invoicing. This invoice contains an incomplete carton group.');
       }
     }
     const isMerged = Boolean(group.cartonId && group.rows.length > 1);
